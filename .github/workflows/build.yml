@@ -38,10 +38,21 @@ jobs:
             -e 's/AVCaptureSession\.wasInterruptedNotification/NSNotification.Name.AVCaptureSessionWasInterrupted/g' \
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
+      # 🔓 关闭签名要求（新增！就这一步）
+      - name: Disable code signing
+        run: |
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGN_IDENTITY = [^;]*;/CODE_SIGN_IDENTITY = "";/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGNING_REQUIRED = [^;]*;/CODE_SIGNING_REQUIRED = NO;/g' "$PBXPROJ"
+          sed -i '' 's/CODE_SIGNING_ALLOWED = [^;]*;/CODE_SIGNING_ALLOWED = NO;/g' "$PBXPROJ"
+          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = [^;]*;/PROVISIONING_PROFILE_SPECIFIER = "";/g' "$PBXPROJ"
+          echo "✅ Code signing disabled in $PBXPROJ"
+
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
 
-      # 📦 打包 ipa —— 关键改动：cp -RL 消除符号链接 + 打印结构方便核对
+      # 📦 打包 ipa
       - name: Package unsigned ipa
         run: |
           set -e
