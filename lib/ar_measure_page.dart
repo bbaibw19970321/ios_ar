@@ -13,10 +13,10 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   late ARKitController arkitController;
 
   final List<vector.Vector3> _pts = [];
+  final List<ARKitNode> _nodes = [];
   vector.Vector3? _lastPosition;
   String _info = '将手机对准地面/桌面，缓慢移动后点击屏幕打点';
   String _result = '';
-  int _nodeCount = 0;
 
   @override
   void dispose() {
@@ -28,13 +28,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(children: [
-        // ===== AR 视图（完全按官方示例写法）=====
         ARKitSceneView(
           enableTapRecognizer: true,
           onARKitViewCreated: _onARKitViewCreated,
         ),
 
-        // ===== 顶部提示 =====
+        // 顶部提示
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
           left: 16,
@@ -53,22 +52,17 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           ),
         ),
 
-        // ===== 中心准星 =====
+        // 中心准星
         Center(
-          child: Icon(
-            Icons.add,
-            color: Colors.white.withOpacity(0.6),
-            size: 36,
-          ),
+          child: Icon(Icons.add, color: Colors.white.withOpacity(0.6), size: 36),
         ),
 
-        // ===== 底部面板 =====
+        // 底部面板
         Positioned(
           left: 16,
           right: 16,
           bottom: MediaQuery.of(context).padding.bottom + 16,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // 结果卡片
             if (_result.isNotEmpty)
               Container(
                 width: double.infinity,
@@ -82,14 +76,13 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                   _result,
                   style: const TextStyle(
                     color: Colors.greenAccent,
-                    fontSize: 20,
+                    fontSize: 24,
                     fontWeight: FontWeight.bold,
                     height: 1.4,
                   ),
                   textAlign: TextAlign.center,
                 ),
               ),
-            // 按钮行
             Row(children: [
               _btn('清空', Icons.delete_outline, _clear),
               const SizedBox(width: 10),
@@ -126,7 +119,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   }
 
   // ============================================================
-  //  AR 回调（完全照搬官方示例）
+  //  AR 回调
   // ============================================================
 
   void _onARKitViewCreated(ARKitController controller) {
@@ -142,7 +135,6 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   }
 
   void _onTapPoint(ARKitTestResult hitResult) {
-    // 从 4x4 矩阵第 4 列取世界坐标
     final position = vector.Vector3(
       hitResult.worldTransform.getColumn(3).x,
       hitResult.worldTransform.getColumn(3).y,
@@ -150,26 +142,20 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     );
 
     setState(() {
-      // 1) 放小球
       _addDot(position);
 
-      // 2) 如果有上一个点 → 画线 + 标注距离
       if (_lastPosition != null) {
         _addLine(_lastPosition!, position);
-        _addDistanceLabel(_lastPosition!, position);
       }
 
-      // 3) 记录
       _pts.add(position);
       _lastPosition = position;
-
-      // 4) 更新底部读数
       _updateReadout();
     });
   }
 
   // ============================================================
-  //  3D 对象添加（完全用官方 API）
+  //  添加 3D 对象
   // ============================================================
 
   void _addDot(vector.Vector3 pos) {
@@ -177,62 +163,21 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       lightingModelName: ARKitLightingModel.constant,
       diffuse: ARKitMaterialProperty.color(Colors.yellow),
     );
-    final sphere = ARKitSphere(
-      radius: 0.008,
-      materials: [material],
-    );
-    final node = ARKitNode(
-      geometry: sphere,
-      position: pos,
-    );
+    final sphere = ARKitSphere(radius: 0.008, materials: [material]);
+    final node = ARKitNode(geometry: sphere, position: pos);
     arkitController.add(node);
-    _nodeCount++;
+    _nodes.add(node);
   }
 
   void _addLine(vector.Vector3 from, vector.Vector3 to) {
-    final line = ARKitLine(
-      fromVector: from,
-      toVector: to,
-    );
+    final line = ARKitLine(fromVector: from, toVector: to);
     final node = ARKitNode(geometry: line);
     arkitController.add(node);
-    _nodeCount++;
-  }
-
-  /// 在两点中间放一个 3D 文字标注距离
-  void _addDistanceLabel(vector.Vector3 a, vector.Vector3 b) {
-    final dist = a.distanceTo(b);
-    final label = dist < 1
-        ? '${(dist * 100).toStringAsFixed(1)} cm'
-        : '${dist.toStringAsFixed(2)} m';
-
-    final mid = vector.Vector3(
-      (a.x + b.x) / 2,
-      (a.y + b.y) / 2 + 0.02, // 稍微抬高一点
-      (a.z + b.z) / 2,
-    );
-
-    final textGeometry = ARKitText(
-      text: label,
-      extrusionDepth: 1,
-      materials: [
-        ARKitMaterial(
-          diffuse: ARKitMaterialProperty.color(Colors.red),
-        ),
-      ],
-    );
-    const scale = 0.001;
-    final node = ARKitNode(
-      geometry: textGeometry,
-      position: mid,
-      scale: vector.Vector3(scale, scale, scale),
-    );
-    arkitController.add(node);
-    _nodeCount++;
+    _nodes.add(node);
   }
 
   // ============================================================
-  //  读数 / 面积
+  //  读数（只显示最新两点距离）
   // ============================================================
 
   void _updateReadout() {
@@ -241,27 +186,15 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       _info = '已标记 ${_pts.length} 个点，继续点击屏幕';
       return;
     }
-    double total = 0;
-    for (int i = 1; i < _pts.length; i++) {
-      total += _pts[i].distanceTo(_pts[i - 1]);
-    }
-    final buf = StringBuffer();
-    buf.writeln('📏 总距离：${_fmtLen(total)}');
-    if (_pts.length >= 3) {
-      buf.writeln('📐 面积：${_fmtArea(_shoelaceXZ(_pts))}');
-    }
-    _result = buf.toString().trim();
-    _info = '已标记 ${_pts.length} 个点 ｜ 点击继续，或点「测面积」';
+    final dist = _pts.last.distanceTo(_pts[_pts.length - 2]);
+    _result = '📏 ${_fmtLen(dist)}';
+    _info = '已标记 ${_pts.length} 个点 ｜ 点击继续打点';
   }
 
   void _showArea() {
     if (_pts.length < 3) return;
     setState(() {
-      // 画闭合线
       _addLine(_pts.last, _pts.first);
-
-      // 闭合段距离标注
-      _addDistanceLabel(_pts.last, _pts.first);
 
       double perimeter = 0;
       for (int i = 1; i < _pts.length; i++) {
@@ -275,11 +208,21 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     });
   }
 
-  /// 清空：重新进入页面（最可靠的方式）
+  // ============================================================
+  //  清空（不重建页面，环境保留）
+  // ============================================================
+
   void _clear() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const ARMeasurePage()),
-    );
+    setState(() {
+      for (final node in _nodes) {
+        arkitController.remove(node.name);
+      }
+      _nodes.clear();
+      _pts.clear();
+      _lastPosition = null;
+      _result = '';
+      _info = '将手机对准地面/桌面，缓慢移动后点击屏幕打点';
+    });
   }
 
   // ============================================================
