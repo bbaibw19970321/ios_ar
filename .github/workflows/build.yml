@@ -31,18 +31,13 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-<<<<<<< HEAD
       # 🪡 缝旧内芯（保留！）
-=======
-      # 🪡 关键新增：编译前把旧内芯里那两处坏写法缝好
->>>>>>> a09db40 (build1)
       - name: Patch camera Swift for new Xcode
         run: |
           find "$HOME/.pub-cache" -name DefaultCamera.swift -path "*camera_avfoundation*" -print -exec sed -i '' \
             -e 's/AVCaptureSession\.wasInterruptedNotification/NSNotification.Name.AVCaptureSessionWasInterrupted/g' \
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
-<<<<<<< HEAD
       # 🔓 骗过 Flutter 的 Team 检查（关键改动）
       - name: Disable code signing
         run: |
@@ -61,8 +56,6 @@ jobs:
           grep -c "DEVELOPMENT_TEAM = XXXXXXXXXX" "$PBXPROJ"
           grep -c "CODE_SIGNING_ALLOWED = NO" "$PBXPROJ"
 
-=======
->>>>>>> a09db40 (build1)
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
 
