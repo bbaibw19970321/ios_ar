@@ -8,7 +8,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '测距测面积',
+      title: '测距测面积1',
       theme: ThemeData.dark(),
       home: const ARMeasurePage(),
     );
