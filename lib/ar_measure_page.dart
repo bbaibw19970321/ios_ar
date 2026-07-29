@@ -2,7 +2,9 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:arkit_plugin/arkit_plugin.dart';
 import 'package:vector_math/vector_math_64.dart' as v64;
+import 'package:collection/collection.dart';
 
+/// AR 测距 + 测面积 页面（适配 arkit_plugin 1.4.0 官方 API）
 class ARMeasurePage extends StatefulWidget {
   const ARMeasurePage({super.key});
   @override
@@ -13,7 +15,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   ARKitController? _controller;
 
   final List<v64.Vector3> _pts = [];
-  final List<String> _nodeIds = [];
+  final List<ARKitNode> _nodes = []; // 存储所有节点引用
   String _info = '将手机对准地面/桌面，缓慢移动以识别平面';
   String _result = '';
 
@@ -22,13 +24,11 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     return Scaffold(
       body: Stack(children: [
         ARKitSceneView(
-          planeDetection: ARPlaneDetection.horizontalAndVertical,
           showFeaturePoints: true,
+          planeDetection: ARPlaneDetection.horizontalAndVertical,
           autoenablesDefaultLighting: true,
-          onARKitViewCreated: (c) {
-            _controller = c;
-          },
-          onARTap: _onARTap,
+          enableTapRecognizer: true, // ✅ 启用点击识别
+          onARKitViewCreated: _onARKitViewCreated,
         ),
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
@@ -111,29 +111,51 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     );
   }
 
-  void _onARTap(ARKitHitTestResultType type, List<ARKitNode> nodes) {
-    if (nodes.isEmpty) return;
-    final pos = nodes.first.position;
+  // ============================================================
+  //  核心逻辑
+  // ============================================================
 
-    setState(() {
-      final dotName = 'dot_${_pts.length}';
-      _addNode(_makeDot(pos), dotName);
-
-      if (_pts.isNotEmpty) {
-        final prev = _pts.last;
-        final lineName = 'line_${_pts.length}';
-        _addNode(_makeLine(prev, pos), lineName);
+  /// ✅ 在 controller 上设置 onARTap 回调（官方写法）
+  void _onARKitViewCreated(ARKitController controller) {
+    _controller = controller;
+    _controller!.onARTap = (List<ARKitTestResult> ar) {
+      final planeTap = ar.firstWhereOrNull(
+        (tap) => tap.type == ARKitHitTestResultType.existingPlaneUsingExtent,
+      );
+      if (planeTap != null) {
+        _onPlaneTap(planeTap.worldTransform);
       }
-
-      _pts.add(pos);
-      _updateReadout();
-    });
+    };
   }
 
-  void _addNode(ARKitNode node, String name) {
-    node.name = name;
-    _controller!.add(node);
-    _nodeIds.add(name);
+  /// 点击平面 → 提取坐标 → 加点/画线
+  void _onPlaneTap(v64.Matrix4 transform) {
+    final position = v64.Vector3(
+      transform.getColumn(3).x,
+      transform.getColumn(3).y,
+      transform.getColumn(3).z,
+    );
+
+    setState(() {
+      // 1) 放小球标记
+      final dot = _makeDot(position);
+      _controller!.add(dot);
+      _nodes.add(dot);
+
+      // 2) 画连线
+      if (_pts.isNotEmpty) {
+        final line = _makeLine(_pts.last, position);
+        final lineNode = ARKitNode(geometry: line);
+        _controller!.add(lineNode);
+        _nodes.add(lineNode);
+      }
+
+      // 3) 记录坐标
+      _pts.add(position);
+
+      // 4) 刷新
+      _updateReadout();
+    });
   }
 
   void _updateReadout() {
@@ -159,7 +181,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   void _showArea() {
     if (_pts.length < 3) return;
     setState(() {
-      _addNode(_makeLine(_pts.last, _pts.first), 'line_close');
+      // 闭合线
+      final closeLine = _makeLine(_pts.last, _pts.first);
+      final closeNode = ARKitNode(geometry: closeLine);
+      _controller!.add(closeNode);
+      _nodes.add(closeNode);
+
       final area = _shoelaceXZ(_pts);
       double total = 0;
       for (int i = 1; i < _pts.length; i++) {
@@ -175,44 +202,60 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     if (_pts.isEmpty) return;
     setState(() {
       _pts.removeLast();
-      if (_nodeIds.isNotEmpty) _controller!.remove(_nodeIds.removeLast());
-      if (_nodeIds.isNotEmpty) _controller!.remove(_nodeIds.removeLast());
+      // 移除最近的节点（点+线）
+      if (_nodes.isNotEmpty) {
+        _controller!.remove(_nodes.removeLast().name);
+      }
+      if (_nodes.isNotEmpty) {
+        _controller!.remove(_nodes.removeLast().name);
+      }
       _updateReadout();
     });
   }
 
   void _clear() {
     setState(() {
-      for (final id in _nodeIds) {
-        _controller!.remove(id);
+      for (final n in _nodes) {
+        _controller!.remove(n.name);
       }
-      _nodeIds.clear();
+      _nodes.clear();
       _pts.clear();
       _result = '';
       _info = '将手机对准地面/桌面，缓慢移动以识别平面';
     });
   }
 
+  // ============================================================
+  //  3D 对象工厂（官方 API 写法）
+  // ============================================================
+
+  /// ✅ ARKitSphere（不是 ARKitSphereGeometry）
+  /// ✅ ARKitMaterialProperty.color()（不是 ARKitMaterialProperty(color:)）
   ARKitNode _makeDot(v64.Vector3 pos) {
+    final material = ARKitMaterial(
+      lightingModelName: ARKitLightingModel.constant,
+      diffuse: ARKitMaterialProperty.color(Colors.yellow),
+    );
+    final sphere = ARKitSphere(
+      radius: 0.01,
+      materials: [material],
+    );
     return ARKitNode(
+      geometry: sphere,
       position: pos,
-      geometry: ARKitSphereGeometry(
-        radius: 0.01,
-        materials: [
-          ARKitMaterial(
-            diffuse: ARKitMaterialProperty(color: Colors.yellow),
-            specular: ARKitMaterialProperty(color: Colors.white),
-          ),
-        ],
-      ),
     );
   }
 
-  ARKitNode _makeLine(v64.Vector3 from, v64.Vector3 to) {
-    return ARKitNode(
-      geometry: ARKitLine(fromVector: from, toVector: to),
+  ARKitLine _makeLine(v64.Vector3 from, v64.Vector3 to) {
+    return ARKitLine(
+      fromVector: from,
+      toVector: to,
     );
   }
+
+  // ============================================================
+  //  数学工具
+  // ============================================================
 
   double _shoelaceXZ(List<v64.Vector3> pts) {
     if (pts.length < 3) return 0;
