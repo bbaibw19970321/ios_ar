@@ -38,16 +38,23 @@ jobs:
             -e 's/AVCaptureSession\.wasInterruptedNotification/NSNotification.Name.AVCaptureSessionWasInterrupted/g' \
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
-      # 🔓 关闭签名要求（新增！就这一步）
+      # 🔓 关闭签名（加强版：先删后加）
       - name: Disable code signing
         run: |
           PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-          sed -i '' 's/DEVELOPMENT_TEAM = [^;]*;/DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
-          sed -i '' 's/CODE_SIGN_IDENTITY = [^;]*;/CODE_SIGN_IDENTITY = "";/g' "$PBXPROJ"
-          sed -i '' 's/CODE_SIGNING_REQUIRED = [^;]*;/CODE_SIGNING_REQUIRED = NO;/g' "$PBXPROJ"
-          sed -i '' 's/CODE_SIGNING_ALLOWED = [^;]*;/CODE_SIGNING_ALLOWED = NO;/g' "$PBXPROJ"
-          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = [^;]*;/PROVISIONING_PROFILE_SPECIFIER = "";/g' "$PBXPROJ"
-          echo "✅ Code signing disabled in $PBXPROJ"
+          sed -i '' '/DEVELOPMENT_TEAM/d' "$PBXPROJ"
+          sed -i '' '/CODE_SIGN_IDENTITY/d' "$PBXPROJ"
+          sed -i '' '/CODE_SIGN_STYLE/d' "$PBXPROJ"
+          sed -i '' '/CODE_SIGNING_REQUIRED/d' "$PBXPROJ"
+          sed -i '' '/CODE_SIGNING_ALLOWED/d' "$PBXPROJ"
+          sed -i '' '/PROVISIONING_PROFILE/d' "$PBXPROJ"
+          sed -i '' 's/buildSettings = {/buildSettings = {\
+          				CODE_SIGNING_ALLOWED = NO;\
+          				CODE_SIGNING_REQUIRED = NO;\
+          				CODE_SIGN_IDENTITY = "";\
+          				DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
+          echo "===== verify ====="
+          grep -n "CODE_SIGNING_ALLOWED" "$PBXPROJ" || echo "INJECT FAILED"
 
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
