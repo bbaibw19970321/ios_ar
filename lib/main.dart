@@ -1,21 +1,17 @@
-import 'dart:math' as math;
 import 'package:arkit_plugin/arkit_plugin.dart';
 import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart' as vector;
 import 'package:collection/collection.dart';
 
-class DistanceTrackingPage extends StatefulWidget {
-  const DistanceTrackingPage({super.key});
+class MeasurePage extends StatefulWidget {
+  const MeasurePage({super.key});
 
   @override
-  State<DistanceTrackingPage> createState() => _DistanceTrackingPageState();
+  State<MeasurePage> createState() => _MeasurePageState();
 }
 
-class _DistanceTrackingPageState extends State<DistanceTrackingPage> {
+class _MeasurePageState extends State<MeasurePage> {
   late ARKitController arkitController;
-  ARKitPlane? plane;
-  ARKitNode? node;
-  String? anchorId;
   vector.Vector3? lastPosition;
 
   @override
@@ -26,80 +22,37 @@ class _DistanceTrackingPageState extends State<DistanceTrackingPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Distance Tracking Sample')),
-        body: ARKitSceneView(
-          showFeaturePoints: true,
-          planeDetection: ARPlaneDetection.horizontal,
-          onARKitViewCreated: onARKitViewCreated,
-          enableTapRecognizer: true,
-        ),
-      );
+      appBar: AppBar(
+        title: const Text('Measure Sample'),
+      ),
+      body: ARKitSceneView(
+        enableTapRecognizer: true,
+        onARKitViewCreated: onARKitViewCreated,
+      ));
 
   void onARKitViewCreated(ARKitController arkitController) {
     this.arkitController = arkitController;
-    this.arkitController.onAddNodeForAnchor = _handleAddAnchor;
-    this.arkitController.onUpdateNodeForAnchor = _handleUpdateAnchor;
-    this.arkitController.onARTap = (List<ARKitTestResult> ar) {
-      final planeTap = ar.firstWhereOrNull(
-        (tap) => tap.type == ARKitHitTestResultType.existingPlaneUsingExtent,
+    this.arkitController.onARTap = (ar) {
+      final point = ar.firstWhereOrNull(
+        (o) => o.type == ARKitHitTestResultType.featurePoint,
       );
-      if (planeTap != null) {
-        _onPlaneTapHandler(planeTap.worldTransform);
+      if (point != null) {
+        _onARTapHandler(point);
       }
     };
   }
 
-  void _handleAddAnchor(ARKitAnchor anchor) {
-    if (anchor is! ARKitPlaneAnchor) {
-      return;
-    }
-    _addPlane(arkitController, anchor);
-  }
-
-  void _handleUpdateAnchor(ARKitAnchor anchor) {
-    if (anchor.identifier != anchorId) {
-      return;
-    }
-    final planeAnchor = anchor as ARKitPlaneAnchor;
-    node!.position =
-        vector.Vector3(planeAnchor.center.x, 0, planeAnchor.center.z);
-    plane?.width.value = planeAnchor.extent.x;
-    plane?.height.value = planeAnchor.extent.z;
-  }
-
-  void _addPlane(ARKitController controller, ARKitPlaneAnchor anchor) {
-    anchorId = anchor.identifier;
-    plane = ARKitPlane(
-      width: anchor.extent.x,
-      height: anchor.extent.z,
-      materials: [
-        ARKitMaterial(
-          transparency: 0.5,
-          diffuse: ARKitMaterialProperty.color(Colors.white),
-        )
-      ],
-    );
-
-    node = ARKitNode(
-      geometry: plane,
-      position: vector.Vector3(anchor.center.x, 0, anchor.center.z),
-      rotation: vector.Vector4(1, 0, 0, -math.pi / 2),
-    );
-    controller.add(node!, parentNodeName: anchor.nodeName);
-  }
-
-  void _onPlaneTapHandler(Matrix4 transform) {
+  void _onARTapHandler(ARKitTestResult point) {
     final position = vector.Vector3(
-      transform.getColumn(3).x,
-      transform.getColumn(3).y,
-      transform.getColumn(3).z,
+      point.worldTransform.getColumn(3).x,
+      point.worldTransform.getColumn(3).y,
+      point.worldTransform.getColumn(3).z,
     );
     final material = ARKitMaterial(
-      lightingModelName: ARKitLightingModel.constant,
-      diffuse: ARKitMaterialProperty.color(Color.fromRGBO(255, 153, 83, 1)),
-    );
+        lightingModelName: ARKitLightingModel.constant,
+        diffuse: ARKitMaterialProperty.color(Colors.blue));
     final sphere = ARKitSphere(
-      radius: 0.003,
+      radius: 0.006,
       materials: [material],
     );
     final node = ARKitNode(
@@ -107,6 +60,7 @@ class _DistanceTrackingPageState extends State<DistanceTrackingPage> {
       position: position,
     );
     arkitController.add(node);
+
     if (lastPosition != null) {
       final line = ARKitLine(
         fromVector: lastPosition!,
@@ -148,20 +102,6 @@ class _DistanceTrackingPageState extends State<DistanceTrackingPage> {
       position: point,
       scale: vectorScale,
     );
-    arkitController
-        .getNodeBoundingBox(node)
-        .then((List<vector.Vector3> result) {
-      final minVector = result[0];
-      final maxVector = result[1];
-      final dx = (maxVector.x - minVector.x) / 2 * scale;
-      final dy = (maxVector.y - minVector.y) / 2 * scale;
-      final position = vector.Vector3(
-        node.position.x - dx,
-        node.position.y - dy,
-        node.position.z,
-      );
-      node.position = position;
-    });
     arkitController.add(node);
   }
 }
