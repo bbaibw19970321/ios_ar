@@ -1,24 +1,42 @@
 name: Build iOS
 
-on:
-  workflow_dispatch:        # 手动按钮触发
-  push:                     # push 代码也自动触发
-    branches: [ master ]
+on: [push, workflow_dispatch]
 
 jobs:
   build:
-    runs-on: macos-14       # 苹果 M1 机器，编译快
+    runs-on: macos-14
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Fix git safe directory
+        run: git config --global --add safe.directory '*'
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: stable   # 用稳定版，不会因版本号不存在而失败
+          channel: stable
+          cache: false
+
+      - name: Flutter doctor
+        run: |
+          flutter config --no-analytics
+          flutter doctor -v
+
+      - name: Accept Xcode license
+        run: |
+          sudo xcodebuild -license accept || true
+          xcodebuild -version
 
       - name: Get dependencies
         run: flutter pub get
+
+      # 🪡 关键新增：编译前把旧内芯里那两处坏写法缝好
+      - name: Patch camera Swift for new Xcode
+        run: |
+          find "$HOME/.pub-cache" -name DefaultCamera.swift -path "*camera_avfoundation*" -print -exec sed -i '' \
+            -e 's/AVCaptureSession\.wasInterruptedNotification/NSNotification.Name.AVCaptureSessionWasInterrupted/g' \
+            -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
