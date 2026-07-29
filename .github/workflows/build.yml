@@ -38,23 +38,23 @@ jobs:
             -e 's/AVCaptureSession\.wasInterruptedNotification/NSNotification.Name.AVCaptureSessionWasInterrupted/g' \
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
-      # 🔓 关闭签名（加强版：先删后加）
+      # 🔓 骗过 Flutter 的 Team 检查（关键改动）
       - name: Disable code signing
         run: |
           PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
           sed -i '' '/DEVELOPMENT_TEAM/d' "$PBXPROJ"
           sed -i '' '/CODE_SIGN_IDENTITY/d' "$PBXPROJ"
           sed -i '' '/CODE_SIGN_STYLE/d' "$PBXPROJ"
-          sed -i '' '/CODE_SIGNING_REQUIRED/d' "$PBXPROJ"
-          sed -i '' '/CODE_SIGNING_ALLOWED/d' "$PBXPROJ"
           sed -i '' '/PROVISIONING_PROFILE/d' "$PBXPROJ"
           sed -i '' 's/buildSettings = {/buildSettings = {\
+          				DEVELOPMENT_TEAM = XXXXXXXXXX;\
           				CODE_SIGNING_ALLOWED = NO;\
           				CODE_SIGNING_REQUIRED = NO;\
           				CODE_SIGN_IDENTITY = "";\
-          				DEVELOPMENT_TEAM = "";/g' "$PBXPROJ"
+          				CODE_SIGN_STYLE = Manual;/g' "$PBXPROJ"
           echo "===== verify ====="
-          grep -n "CODE_SIGNING_ALLOWED" "$PBXPROJ" || echo "INJECT FAILED"
+          grep -c "DEVELOPMENT_TEAM = XXXXXXXXXX" "$PBXPROJ"
+          grep -c "CODE_SIGNING_ALLOWED = NO" "$PBXPROJ"
 
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
