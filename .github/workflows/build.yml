@@ -31,7 +31,7 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # 🪡 关键新增：编译前把旧内芯里那两处坏写法缝好
+      # 🪡 缝旧内芯（保留！）
       - name: Patch camera Swift for new Xcode
         run: |
           find "$HOME/.pub-cache" -name DefaultCamera.swift -path "*camera_avfoundation*" -print -exec sed -i '' \
@@ -41,8 +41,22 @@ jobs:
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
 
-      - name: Upload app
+      # 📦 打包 ipa —— 关键改动：cp -RL 消除符号链接 + 打印结构方便核对
+      - name: Package unsigned ipa
+        run: |
+          set -e
+          cd build/ios/iphoneos
+          rm -rf Payload Runner.ipa
+          mkdir Payload
+          cp -RL Runner.app Payload/
+          zip -qr Runner.ipa Payload
+          echo "----- ipa size -----"
+          ls -lh Runner.ipa
+          echo "----- ipa contents (top) -----"
+          unzip -l Runner.ipa | head -25
+
+      - name: Upload ipa
         uses: actions/upload-artifact@v4
         with:
           name: ios-build
-          path: build/ios/iphoneos/
+          path: build/ios/iphoneos/Runner.ipa
