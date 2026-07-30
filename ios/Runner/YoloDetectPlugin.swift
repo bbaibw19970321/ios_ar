@@ -3,28 +3,35 @@ import ARKit
 import Vision
 import CoreML
 
-class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     private var eventSink: FlutterEventSink?
     private var displayLink: CADisplayLink?
     private var visionModel: VNCoreMLModel?
+    private var arSession: ARSession?
     private var isRunning = false
-    private var lastProcessTime: CFTimeInterval = 0
-    private let minInterval: CFTimeInterval = 0.1  // 最多 10fps 推理，省电
+    private var lastTime: CFTimeInterval = 0
+    private let interval: CFTimeInterval = 0.1
 
-    // MARK: - Plugin 注册
+    // MARK: - 注册
 
-    static func register(with registrar: FlutterPluginRegistrar) {
+    public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
 
-        let method = FlutterMethodChannel(name: "yolo_detect", binaryMessenger: registrar.messenger())
+        let method = FlutterMethodChannel(
+            name: "yolo_detect",
+            binaryMessenger: registrar.messenger()
+        )
         registrar.addMethodCallDelegate(instance, channel: method)
 
-        let event = FlutterEventChannel(name: "yolo_detect/events", binaryMessenger: registrar.messenger())
+        let event = FlutterEventChannel(
+            name: "yolo_detect/events",
+            binaryMessenger: registrar.messenger()
+        )
         event.setStreamHandler(instance)
     }
 
-    func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "start":
             startDetection()
@@ -37,110 +44,111 @@ class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
     }
 
-    // MARK: - EventChannel
+    // MARK: - StreamHandler
 
-    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    public func onListen(
+        withArguments arguments: Any?,
+        eventSink events: @escaping FlutterEventSink
+    ) -> FlutterError? {
         eventSink = events
         return nil
     }
 
-    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
         eventSink = nil
         return nil
     }
 
-    // MARK: - 检测控制
+    // MARK: - 核心逻辑
 
     private func startDetection() {
         guard !isRunning else { return }
 
-        // 加载模型（只需一次）
+        if arSession == nil {
+            arSession = findARSession()
+        }
+        guard arSession != nil else {
+            print("❌ 找不到 ARSession")
+            return
+        }
+
         if visionModel == nil {
             guard let url = Bundle.main.url(forResource: "best", withExtension: "mlmodelc"),
-                  let model = try? MLModel(contentsOf: url),
-                  let vnModel = try? VNCoreMLModel(for: model) else {
-                print("❌ YOLO 模型加载失败")
+                  let mlModel = try? MLModel(contentsOf: url),
+                  let vn = try? VNCoreMLModel(for: mlModel) else {
+                print("❌ 模型加载失败")
                 return
             }
-            visionModel = vnModel
+            visionModel = vn
         }
 
         isRunning = true
-        displayLink = CADisplayLink(target: self, selector: #selector(processFrame))
-        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 8, maximum: 15, preferred: 10)
+        displayLink = CADisplayLink(target: self, selector: #selector(tick))
+        displayLink?.preferredFramesPerSecond = 10
         displayLink?.add(to: .main, forMode: .common)
-        print("✅ YOLO 检测已启动")
+        print("✅ YOLO 检测启动")
     }
 
     private func stopDetection() {
         isRunning = false
         displayLink?.invalidate()
         displayLink = nil
-        print("🛑 YOLO 检测已停止")
     }
 
-    // MARK: - 每帧推理
-
-    @objc private func processFrame() {
+    @objc private func tick() {
         guard isRunning,
               let sink = eventSink,
-              let model = visionModel else { return }
+              let model = visionModel,
+              let frame = arSession?.currentFrame else { return }
 
-        // 限流
         let now = CACurrentMediaTime()
-        guard now - lastProcessTime >= minInterval else { return }
-        lastProcessTime = now
-
-        // 从 ARKit 当前帧拿画面（不抢 delegate）
-        guard let session = ARSessionRegistry.shared.currentSession,
-              let frame = session.currentFrame else { return }
+        guard now - lastTime >= interval else { return }
+        lastTime = now
 
         let pixelBuffer = frame.capturedImage
-        let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
-        let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
 
-        // Vision 请求
-        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
-            guard let results = req.results as? [VNRecognizedObjectObservation] else {
-                sink([])
+        let request = VNCoreMLRequest(model: model) { req, _ in
+            guard let obs = req.results as? [VNRecognizedObjectObservation] else {
+                DispatchQueue.main.async { sink([]) }
                 return
             }
-
-            // 转成 Flutter 可用的字典数组
-            let detections: [[String: Any]] = results.compactMap { obs in
-                guard let label = obs.labels.first else { return nil }
-                let box = obs.boundingBox  // 归一化坐标，原点在左下
+            let boxes: [[String: Any]] = obs.compactMap { o in
+                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                let b = o.boundingBox
                 return [
-                    "x": Double(box.origin.x),
-                    "y": Double(1.0 - box.origin.y - box.height),  // 转成左上角原点
-                    "w": Double(box.width),
-                    "h": Double(box.height),
-                    "confidence": Double(label.confidence),
-                    "label": label.identifier,
-                    "imageWidth": imageWidth,
-                    "imageHeight": imageHeight,
+                    "x": b.origin.x,
+                    "y": 1.0 - b.origin.y - b.height,
+                    "w": b.width,
+                    "h": b.height,
+                    "conf": top.confidence,
+                    "label": top.identifier
                 ]
             }
-
-            DispatchQueue.main.async {
-                sink(detections)
-            }
+            DispatchQueue.main.async { sink(boxes) }
         }
         request.imageCropAndScaleOption = .scaleFill
 
-        // 执行推理
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: pixelBuffer,
+            orientation: .right
+        )
         try? handler.perform([request])
     }
-}
 
-// MARK: - ARSession 注册表（获取 arkit_plugin 的 session）
+    // MARK: - 查找 ARSCNView
 
-class ARSessionRegistry {
-    static let shared = ARSessionRegistry()
-    private(set) var currentSession: ARSession?
+    private func findARSession() -> ARSession? {
+        guard let window = UIApplication.shared.windows.first else { return nil }
+        return searchView(window)
+    }
 
-    func register(_ session: ARSession) {
-        currentSession = session
+    private func searchView(_ view: UIView) -> ARSession? {
+        if let arView = view as? ARSCNView {
+            return arView.session
+        }
+        for sub in view.subviews {
+            if let s = searchView(sub) { return s }
+        }
+        return nil
     }
 }
