@@ -12,8 +12,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
     private let interval: CFTimeInterval = 0.1
-
-    // MARK: - 注册
+    private var retryCount = 0
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
@@ -34,8 +33,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "start":
-            startDetection()
-            result(nil)
+            startDetection(result: result)
         case "stop":
             stopDetection()
             result(nil)
@@ -43,8 +41,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             result(FlutterMethodNotImplemented)
         }
     }
-
-    // MARK: - StreamHandler
 
     public func onListen(
         withArguments arguments: Any?,
@@ -59,40 +55,79 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         return nil
     }
 
-    // MARK: - 核心逻辑
+    // MARK: - 核心
 
-    private func startDetection() {
-        guard !isRunning else { return }
+    private func startDetection(result: @escaping FlutterResult) {
+        guard !isRunning else { result(nil); return }
 
+        // 加载模型
+        if visionModel == nil {
+            // 打印 bundle 里有什么（调试用）
+            let bundlePath = Bundle.main.bundlePath
+            print("📂 Bundle path: \(bundlePath)")
+            if let items = try? FileManager.default.contentsOfDirectory(atPath: bundlePath) {
+                let mlItems = items.filter { $0.contains("best") || $0.contains("mlmodel") }
+                print("📦 模型相关文件: \(mlItems)")
+            }
+
+            guard let url = Bundle.main.url(forResource: "best", withExtension: "mlmodelc") else {
+                print("❌ 找不到 best.mlmodelc")
+                result(FlutterError(code: "MODEL_NOT_FOUND",
+                                    message: "best.mlmodelc 不在 Bundle 中",
+                                    details: nil))
+                return
+            }
+            print("✅ 找到模型: \(url)")
+
+            do {
+                let mlModel = try MLModel(contentsOf: url)
+                visionModel = try VNCoreMLModel(for: mlModel)
+                print("✅ 模型加载成功")
+            } catch {
+                print("❌ 模型加载失败: \(error)")
+                result(FlutterError(code: "MODEL_LOAD_ERROR",
+                                    message: error.localizedDescription,
+                                    details: nil))
+                return
+            }
+        }
+
+        // 查找 ARSession（带重试）
         if arSession == nil {
             arSession = findARSession()
         }
-        guard arSession != nil else {
-            print("❌ 找不到 ARSession")
-            return
-        }
-
-        if visionModel == nil {
-            guard let url = Bundle.main.url(forResource: "best", withExtension: "mlmodelc"),
-                  let mlModel = try? MLModel(contentsOf: url),
-                  let vn = try? VNCoreMLModel(for: mlModel) else {
-                print("❌ 模型加载失败")
+        if arSession == nil {
+            retryCount += 1
+            if retryCount <= 10 {
+                print("⏳ ARSession 未找到，0.5秒后重试 (\(retryCount)/10)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.startDetection(result: result)
+                }
+                return
+            } else {
+                print("❌ 重试10次仍找不到 ARSession")
+                result(FlutterError(code: "NO_AR_SESSION",
+                                    message: "找不到 ARSession，请确保 AR 视图已打开",
+                                    details: nil))
+                retryCount = 0
                 return
             }
-            visionModel = vn
         }
 
+        retryCount = 0
         isRunning = true
         displayLink = CADisplayLink(target: self, selector: #selector(tick))
         displayLink?.preferredFramesPerSecond = 10
         displayLink?.add(to: .main, forMode: .common)
-        print("✅ YOLO 检测启动")
+        print("✅ 钉螺检测模型已启动")
+        result(nil)
     }
 
     private func stopDetection() {
         isRunning = false
         displayLink?.invalidate()
         displayLink = nil
+        print("🛑 钉螺检测已停止")
     }
 
     @objc private func tick() {
@@ -134,8 +169,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         )
         try? handler.perform([request])
     }
-
-    // MARK: - 查找 ARSCNView
 
     private func findARSession() -> ARSession? {
         guard let window = UIApplication.shared.windows.first else { return nil }

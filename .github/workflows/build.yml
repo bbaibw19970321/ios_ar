@@ -39,8 +39,15 @@ jobs:
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
       # ★★★ 新增：把 YoloDetectPlugin.swift 和 best.mlpackage 注册进 Xcode 工程 ★★★
-      - name: Register YOLO files in Xcode project
+      # ★★★ 编译模型 + 注册文件 ★★★
+      - name: Compile ML model and register in Xcode
         run: |
+          # 1) 把 .mlpackage 编译成 .mlmodelc
+          xcrun coremlcompiler compile ios/Runner/best.mlpackage ios/Runner/
+          echo "===== mlmodelc 编译结果 ====="
+          ls -la ios/Runner/best.mlmodelc/ || echo "❌ mlmodelc 不存在"
+
+          # 2) 注册到 Xcode 工程
           cd ios
           gem install xcodeproj --no-document
           ruby -e '
@@ -50,24 +57,20 @@ jobs:
             target = project.targets.find { |t| t.name == "Runner" }
             runner_group = project.main_group.find_subpath("Runner", false)
 
-            # 添加 YoloDetectPlugin.swift 到编译源
+            # 添加 YoloDetectPlugin.swift
             unless target.source_build_phase.files.any? { |f| f.file_ref&.path&.include?("YoloDetectPlugin") }
               ref = runner_group.new_reference("YoloDetectPlugin.swift")
               ref.last_known_file_type = "sourcecode.swift"
               target.source_build_phase.add_file_reference(ref)
               puts "✅ YoloDetectPlugin.swift → Compile Sources"
-            else
-              puts "⏭️ YoloDetectPlugin.swift already registered"
             end
 
-            # 添加 best.mlpackage 到资源包
-            unless target.resources_build_phase.files.any? { |f| f.file_ref&.path&.include?("best") }
-              ref = runner_group.new_reference("best.mlpackage")
+            # 添加 best.mlmodelc（编译后的模型）到资源
+            unless target.resources_build_phase.files.any? { |f| f.file_ref&.path&.include?("best.mlmodelc") }
+              ref = runner_group.new_reference("best.mlmodelc")
               ref.last_known_file_type = "folder"
               target.resources_build_phase.add_file_reference(ref)
-              puts "✅ best.mlpackage → Bundle Resources"
-            else
-              puts "⏭️ best.mlpackage already registered"
+              puts "✅ best.mlmodelc → Bundle Resources"
             end
 
             project.save
