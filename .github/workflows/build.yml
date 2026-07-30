@@ -39,7 +39,7 @@ jobs:
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
       # ★★★ 新增：把 YoloDetectPlugin.swift 和 best.mlpackage 注册进 Xcode 工程 ★★★
-            - name: Register YOLO files in Xcode project
+      - name: Register YOLO files in Xcode project
         run: |
           cd ios
           gem install xcodeproj --no-document
