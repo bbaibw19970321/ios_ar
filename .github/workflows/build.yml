@@ -39,7 +39,7 @@ jobs:
             -e 's/AVCaptureSession\.runtimeErrorNotification/NSNotification.Name.AVCaptureSessionRuntimeError/g' {} +
 
       # ★★★ 新增：把 YoloDetectPlugin.swift 和 best.mlpackage 注册进 Xcode 工程 ★★★
-      - name: Register YOLO files in Xcode project
+            - name: Register YOLO files in Xcode project
         run: |
           cd ios
           gem install xcodeproj --no-document
@@ -50,25 +50,28 @@ jobs:
             target = project.targets.find { |t| t.name == "Runner" }
             runner_group = project.main_group.find_subpath("Runner", false)
 
-            # 添加 YoloDetectPlugin.swift 到编译源
+            # ① 先清掉所有旧的 best 引用（修掉上次错误注册留下的残留，无论在哪个 phase）
+            old = runner_group.files.select { |f| f.path && f.path.include?("best") }
+            old.each do |f|
+              puts "🗑  remove old ref: #{f.path} (was in wrong phase/type)"
+              f.remove_from_project
+            end
+
+            # ② YoloDetectPlugin.swift → Compile Sources（已存在则跳过）
             unless target.source_build_phase.files.any? { |f| f.file_ref&.path&.include?("YoloDetectPlugin") }
               ref = runner_group.new_reference("YoloDetectPlugin.swift")
               ref.last_known_file_type = "sourcecode.swift"
               target.source_build_phase.add_file_reference(ref)
               puts "✅ YoloDetectPlugin.swift → Compile Sources"
             else
-              puts "⏭️ YoloDetectPlugin.swift already registered"
+              puts "⏭️  YoloDetectPlugin.swift already registered"
             end
 
-            # 添加 best.mlpackage 到资源包
-            unless target.resources_build_phase.files.any? { |f| f.file_ref&.path&.include?("best") }
-              ref = runner_group.new_reference("best.mlpackage")
-              ref.last_known_file_type = "folder"
-              target.resources_build_phase.add_file_reference(ref)
-              puts "✅ best.mlpackage → Bundle Resources"
-            else
-              puts "⏭️ best.mlpackage already registered"
-            end
+            # ③ best.mlpackage → Compile Sources（关键！让 Xcode 用 coremlc 编译成 best.mlmodelc）
+            ref = runner_group.new_reference("best.mlpackage")
+            ref.last_known_file_type = "folder.mlpackage"   # 不是 "folder"！
+            target.source_build_phase.add_file_reference(ref)   # 不是 resources_build_phase！
+            puts "✅ best.mlpackage → Compile Sources (coremlc will emit best.mlmodelc)"
 
             project.save
             puts "✅ project.pbxproj saved"
