@@ -1,4 +1,5 @@
 import Flutter
+import UIKit
 import ARKit
 import Vision
 import CoreML
@@ -59,28 +60,16 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         guard !isRunning else { result(nil); return }
 
         if visionModel == nil {
-            let bundlePath = Bundle.main.bundlePath
-            print("Bundle path: \(bundlePath)")
-            if let items = try? FileManager.default.contentsOfDirectory(atPath: bundlePath) {
-                let mlItems = items.filter { $0.contains("best") || $0.contains("mlmodel") }
-                print("ML files: \(mlItems)")
-            }
-
             guard let url = Bundle.main.url(forResource: "best", withExtension: "mlmodelc") else {
-                print("ERROR: best.mlmodelc not found")
                 result(FlutterError(code: "MODEL_NOT_FOUND",
                                     message: "best.mlmodelc not in bundle",
                                     details: nil))
                 return
             }
-            print("Found model: \(url)")
-
             do {
                 let mlModel = try MLModel(contentsOf: url)
                 visionModel = try VNCoreMLModel(for: mlModel)
-                print("Model loaded OK")
             } catch {
-                print("Model load error: \(error)")
                 result(FlutterError(code: "MODEL_LOAD_ERROR",
                                     message: error.localizedDescription,
                                     details: nil))
@@ -88,19 +77,15 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             }
         }
 
-        if arSession == nil {
-            arSession = findARSession()
-        }
+        if arSession == nil { arSession = findARSession() }
         if arSession == nil {
             retryCount += 1
             if retryCount <= 10 {
-                print("ARSession not found, retry \(retryCount)/10")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.startDetection(result: result)
                 }
                 return
             } else {
-                print("ARSession not found after 10 retries")
                 result(FlutterError(code: "NO_AR_SESSION",
                                     message: "Cannot find ARSession",
                                     details: nil))
@@ -114,7 +99,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         displayLink = CADisplayLink(target: self, selector: #selector(tick))
         displayLink?.preferredFramesPerSecond = 10
         displayLink?.add(to: .main, forMode: .common)
-        print("YOLO detection started")
         result(nil)
     }
 
@@ -122,7 +106,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         isRunning = false
         displayLink?.invalidate()
         displayLink = nil
-        print("YOLO detection stopped")
     }
 
     @objc private func tick() {
@@ -137,6 +120,22 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
+        // ---- 计算 aspect-fill 映射系数：相机图归一化 -> 屏幕归一化 ----
+        let cw = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let ch = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let rImg = min(cw, ch) / max(cw, ch)                 // 摆正竖图宽高比 (<1)
+        let scr = UIScreen.main.bounds.size
+        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
+        let kx: CGFloat
+        let ky: CGFloat
+        if rScr < rImg {     // 竖屏典型：左右被裁，水平放大
+            kx = rImg / rScr
+            ky = 1.0
+        } else {             // 上下被裁，垂直放大
+            kx = 1.0
+            ky = rScr / rImg
+        }
+
         let request = VNCoreMLRequest(model: model) { req, _ in
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
                 DispatchQueue.main.async { sink([]) }
@@ -145,11 +144,21 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             let boxes: [[String: Any]] = obs.compactMap { o in
                 guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
                 let b = o.boundingBox
+                // 1) 摆正竖图、左上原点归一化
+                let u = b.origin.x
+                let v = 1.0 - b.origin.y - b.height
+                let w = b.width
+                let h = b.height
+                // 2) aspect-fill 居中裁剪 -> 屏幕归一化（Dart 直接乘 size 即可）
+                let xN = 0.5 + (u - 0.5) * kx
+                let yN = 0.5 + (v - 0.5) * ky
+                let wN = w * kx
+                let hN = h * ky
                 return [
-                    "x": b.origin.x,
-                    "y": 1.0 - b.origin.y - b.height,
-                    "w": b.width,
-                    "h": b.height,
+                    "x": xN,
+                    "y": yN,
+                    "w": wN,
+                    "h": hN,
                     "conf": top.confidence,
                     "label": top.identifier
                 ]
@@ -171,9 +180,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     }
 
     private func searchView(_ view: UIView) -> ARSession? {
-        if let arView = view as? ARSCNView {
-            return arView.session
-        }
+        if let arView = view as? ARSCNView { return arView.session }
         for sub in view.subviews {
             if let s = searchView(sub) { return s }
         }
