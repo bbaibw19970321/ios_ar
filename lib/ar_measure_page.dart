@@ -14,14 +14,12 @@ class ARMeasurePage extends StatefulWidget {
 class _ARMeasurePageState extends State<ARMeasurePage> {
   late ARKitController arkitController;
 
-  // ---- 测量相关 ----
   final List<vector.Vector3> _pts = [];
   final List<ARKitNode> _nodes = [];
   vector.Vector3? _lastPosition;
   String _info = '将手机对准地面/桌面，缓慢移动后点击屏幕打点';
   String _result = '';
 
-  // ---- YOLO 检测相关 ----
   static const _methodChannel = MethodChannel('yolo_detect');
   static const _eventChannel = EventChannel('yolo_detect/events');
   StreamSubscription? _detectSub;
@@ -44,12 +42,29 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     if (_detecting) return;
     try {
       await _methodChannel.invokeMethod('start');
-      _detectSub = _eventChannel
-          .receiveBroadcastStream()
-          .listen(_onDetections, onError: (_) {});
-      setState(() => _detecting = true);
+      _detectSub = _eventChannel.receiveBroadcastStream().listen(
+        _onDetections,
+        onError: (e) {
+          debugPrint('❌ 事件流错误: $e');
+        },
+      );
+      setState(() {
+        _detecting = true;
+        _info = '🔍 钉螺检测已启动，对准目标...';
+      });
+    } on PlatformException catch (e) {
+      debugPrint('❌ 启动失败: ${e.code} - ${e.message}');
+      if (mounted) {
+        setState(() => _info = '❌ 启动失败: ${e.message}');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('检测启动失败: ${e.message}')),
+        );
+      }
     } catch (e) {
-      debugPrint('启动检测失败: $e');
+      debugPrint('❌ 启动失败: $e');
+      if (mounted) {
+        setState(() => _info = '❌ 启动失败: $e');
+      }
     }
   }
 
@@ -64,28 +79,33 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _detecting = false;
         _detections = [];
         _snailCount = 0;
+        _info = '检测已停止';
       });
     }
   }
 
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
-    final list = (data as List).map((e) {
-      final m = Map<String, dynamic>.from(e);
-      return Detection(
-        x: (m['x'] as num).toDouble(),
-        y: (m['y'] as num).toDouble(),
-        w: (m['w'] as num).toDouble(),
-        h: (m['h'] as num).toDouble(),
-        confidence: (m['confidence'] as num).toDouble(),
-        label: m['label'] as String? ?? 'snail',
-      );
-    }).where((d) => d.confidence > 0.5).toList();
+    try {
+      final list = (data as List).map((e) {
+        final m = Map<String, dynamic>.from(e);
+        return Detection(
+          x: (m['x'] as num).toDouble(),
+          y: (m['y'] as num).toDouble(),
+          w: (m['w'] as num).toDouble(),
+          h: (m['h'] as num).toDouble(),
+          confidence: (m['conf'] as num).toDouble(),
+          label: m['label'] as String? ?? 'snail',
+        );
+      }).where((d) => d.confidence > 0.4).toList();
 
-    setState(() {
-      _detections = list;
-      _snailCount = list.length;
-    });
+      setState(() {
+        _detections = list;
+        _snailCount = list.length;
+      });
+    } catch (e) {
+      debugPrint('⚠️ 解析检测结果出错: $e');
+    }
   }
 
   // ============================================================
@@ -96,13 +116,11 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(children: [
-        // AR 场景
         ARKitSceneView(
           enableTapRecognizer: true,
           onARKitViewCreated: _onARKitViewCreated,
         ),
 
-        // YOLO 检测框叠加层
         if (_detecting)
           Positioned.fill(
             child: CustomPaint(
@@ -110,7 +128,6 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
             ),
           ),
 
-        // 顶部提示
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
           left: 16,
@@ -129,7 +146,6 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           ),
         ),
 
-        // 检测计数徽章（右上角）
         if (_detecting && _snailCount > 0)
           Positioned(
             top: MediaQuery.of(context).padding.top + 70,
@@ -158,18 +174,15 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
             ),
           ),
 
-        // 中心准星
         Center(
           child: Icon(Icons.add, color: Colors.white.withOpacity(0.6), size: 36),
         ),
 
-        // 底部面板
         Positioned(
           left: 16,
           right: 16,
           bottom: MediaQuery.of(context).padding.bottom + 16,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // 距离/面积结果
             if (_result.isNotEmpty)
               Container(
                 width: double.infinity,
@@ -191,7 +204,6 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                 ),
               ),
 
-            // 按钮行 1：测量操作
             Row(children: [
               _btn('清空', Icons.delete_outline, _clear),
               const SizedBox(width: 10),
@@ -211,7 +223,6 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
             const SizedBox(height: 10),
 
-            // 按钮行 2：YOLO 检测开关
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -259,8 +270,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       }
     };
 
-    // AR 就绪后自动开始检测
-    Future.delayed(const Duration(seconds: 1), () {
+    Future.delayed(const Duration(seconds: 2), () {
       if (mounted) _startDetection();
     });
   }
@@ -418,12 +428,9 @@ class DetectionPainter extends CustomPainter {
         d.h * size.height,
       );
 
-      // 半透明填充
       canvas.drawRect(rect, fillPaint);
-      // 边框
       canvas.drawRect(rect, boxPaint);
 
-      // 标签背景
       final label = '🐌 ${(d.confidence * 100).toStringAsFixed(0)}%';
       final tp = TextPainter(
         text: TextSpan(
