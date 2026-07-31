@@ -165,8 +165,8 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             }
             DispatchQueue.main.async { sink(boxes) }
         }
-        request.imageCropAndScaleOption = .scaleFill
-
+        request.imageCropAndScaleOption = .scaleFit
+        
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
             orientation: .right
