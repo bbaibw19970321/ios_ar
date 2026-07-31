@@ -10,11 +10,12 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var displayLink: CADisplayLink?
     private var visionModel: VNCoreMLModel?
     private var arSession: ARSession?
+    private weak var arSCNView: ARSCNView?          // ✅ 新增：保存视图引用，用于 hitTest
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
     private let interval: CFTimeInterval = 0.1
     private var retryCount = 0
-    private var confThreshold: Float = 0.5          // ✅ 新增：动态阈值，默认与 Dart 一致
+    private var confThreshold: Float = 0.5
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
@@ -39,15 +40,50 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         case "stop":
             stopDetection()
             result(nil)
-        case "setConf":                              // ✅ 新增：接收滑块值
+        case "setConf":
             if let n = call.arguments as? NSNumber {
                 confThreshold = n.floatValue
                 print("🎚 conf threshold = \(confThreshold)")
             }
             result(nil)
+        case "hitTestCorners":                       // ✅ 新增：四角 hitTest
+            hitTestCorners(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    // ✅ 新增：屏幕四角 hitTest → 世界坐标
+    private func hitTestCorners(result: @escaping FlutterResult) {
+        guard let arView = arSCNView else {
+            result(FlutterError(code: "NO_AR_VIEW", message: "ARSCNView not found", details: nil))
+            return
+        }
+        let bounds = arView.bounds
+        let insets: CGFloat = 12                     // 内缩 12pt，避免打到屏幕边缘无效区
+        let points = [
+            CGPoint(x: bounds.minX + insets, y: bounds.minY + insets),   // 左上
+            CGPoint(x: bounds.maxX - insets, y: bounds.minY + insets),   // 右上
+            CGPoint(x: bounds.maxX - insets, y: bounds.maxY - insets),   // 右下
+            CGPoint(x: bounds.minX + insets, y: bounds.maxY - insets),   // 左下
+        ]
+        var corners: [[Double]] = []
+        for pt in points {
+            let hits = arView.hitTest(pt, types: [.existingPlaneUsingExtent])
+            guard let hit = hits.first else {
+                result(FlutterError(code: "NO_PLANE",
+                                    message: "未检测到平面，请对准地面/桌面并缓慢移动手机",
+                                    details: nil))
+                return
+            }
+            let t = hit.worldTransform
+            corners.append([
+                Double(t.columns.3.x),
+                Double(t.columns.3.y),
+                Double(t.columns.3.z)
+            ])
+        }
+        result(corners)
     }
 
     public func onListen(
@@ -126,9 +162,8 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         lastTime = now
 
         let pixelBuffer = frame.capturedImage
-        let thr = confThreshold                      // ✅ 新增：本帧阈值快照
+        let thr = confThreshold
 
-        // ---- 计算 aspect-fill 映射系数：相机图归一化 -> 屏幕归一化 ----
         let cw = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let ch = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
         let rImg = min(cw, ch) / max(cw, ch)
@@ -150,7 +185,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > thr else { return nil }   // ✅ 改：0.3 -> thr
+                guard let top = o.labels.first, top.confidence > thr else { return nil }
                 let b = o.boundingBox
                 let u = b.origin.x
                 let v = 1.0 - b.origin.y - b.height
@@ -186,7 +221,10 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     }
 
     private func searchView(_ view: UIView) -> ARSession? {
-        if let arView = view as? ARSCNView { return arView.session }
+        if let arView = view as? ARSCNView {
+            arSCNView = arView                       // ✅ 新增：顺手保存视图引用
+            return arView.session
+        }
         for sub in view.subviews {
             if let s = searchView(sub) { return s }
         }

@@ -5,6 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vector;
 import 'package:collection/collection.dart';
 
+// ✅ 新增：测量模式
+enum MeasureMode { fullFrame, manual }
+
 class ARMeasurePage extends StatefulWidget {
   const ARMeasurePage({super.key});
   @override
@@ -14,29 +17,40 @@ class ARMeasurePage extends StatefulWidget {
 class _ARMeasurePageState extends State<ARMeasurePage> {
   late ARKitController arkitController;
 
+  // ---- 手动选点 ----
   final List<vector.Vector3> _pts = [];
   final List<ARKitNode> _nodes = [];
   vector.Vector3? _lastPosition;
+
   String _info = '将手机对准地面/桌面，缓慢移动后点击屏幕打点';
   String _result = '';
 
+  // ---- 检测 ----
   static const _methodChannel = MethodChannel('yolo_detect');
   static const _eventChannel = EventChannel('yolo_detect/events');
   StreamSubscription? _detectSub;
   List<Detection> _detections = [];
   bool _detecting = false;
   int _snailCount = 0;
-  double _conf = 0.5;   // ✅ 新增：置信度阈值，由滑块控制（想保持原手感改成 0.7）
+  double _conf = 0.5;
+
+  // ---- ✅ 新增：模式 & 整图面积 ----
+  MeasureMode _mode = MeasureMode.fullFrame;
+  double? _fullFrameArea;
+  bool _measuring = false;
+  Timer? _liveTimer;
+  bool _liveMode = false;
 
   @override
   void dispose() {
+    _liveTimer?.cancel();
     _stopDetection();
     arkitController.dispose();
     super.dispose();
   }
 
   // ============================================================
-  //  YOLO 检测控制
+  //  YOLO 检测控制（不变）
   // ============================================================
 
   Future<void> _startDetection() async {
@@ -45,9 +59,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       await _methodChannel.invokeMethod('start');
       _detectSub = _eventChannel.receiveBroadcastStream().listen(
         _onDetections,
-        onError: (e) {
-          debugPrint('❌ 事件流错误: $e');
-        },
+        onError: (e) => debugPrint('❌ 事件流错误: $e'),
       );
       setState(() {
         _detecting = true;
@@ -63,9 +75,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       }
     } catch (e) {
       debugPrint('❌ 启动失败: $e');
-      if (mounted) {
-        setState(() => _info = '❌ 启动失败: $e');
-      }
+      if (mounted) setState(() => _info = '❌ 启动失败: $e');
     }
   }
 
@@ -98,7 +108,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > _conf).toList();   // ✅ 改：0.7 -> _conf
+      }).where((d) => d.confidence > _conf).toList();
 
       setState(() {
         _detections = list;
@@ -110,11 +120,97 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   }
 
   // ============================================================
+  //  ✅ 新增：整图面积测量
+  // ============================================================
+
+  Future<void> _measureFullFrame() async {
+    if (_measuring) return;
+    setState(() => _measuring = true);
+    try {
+      final raw = await _methodChannel.invokeMethod('hitTestCorners');
+      final corners = (raw as List)
+          .map((e) => vector.Vector3(
+                (e[0] as num).toDouble(),
+                (e[1] as num).toDouble(),
+                (e[2] as num).toDouble(),
+              ))
+          .toList();
+      final area = _shoelace3D(corners);
+      if (mounted) {
+        setState(() {
+          _fullFrameArea = area;
+          _result = '📐 整图面积：${_fmtArea(area)}';
+          _info = _snailCount > 0
+              ? '🐌 密度：${_snailCount / area.toStringAsFixed(2)} 只/m²'
+              : '测量完成，移动手机可重新测量';
+        });
+      }
+    } on PlatformException catch (e) {
+      if (mounted) {
+        setState(() => _info = '⚠️ ${e.message ?? "测量失败，请对准平面"}');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _info = '⚠️ 测量失败: $e');
+    } finally {
+      if (mounted) setState(() => _measuring = false);
+    }
+  }
+
+  /// 3D 多边形面积（鞋带公式 + 叉积）
+  double _shoelace3D(List<vector.Vector3> pts) {
+    if (pts.length < 3) return 0;
+    var cross = vector.Vector3.zero();
+    for (int i = 0; i < pts.length; i++) {
+      final j = (i + 1) % pts.length;
+      cross += pts[i].cross(pts[j]);
+    }
+    return cross.length / 2.0;
+  }
+
+  void _toggleLive() {
+    if (_liveMode) {
+      _liveTimer?.cancel();
+      _liveTimer = null;
+      setState(() => _liveMode = false);
+    } else {
+      setState(() => _liveMode = true);
+      _measureFullFrame();
+      _liveTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+        _measureFullFrame();
+      });
+    }
+  }
+
+  // ============================================================
+  //  ✅ 新增：模式切换
+  // ============================================================
+
+  void _switchMode(MeasureMode m) {
+    if (_mode == m) return;
+    _liveTimer?.cancel();
+    _liveTimer = null;
+    setState(() {
+      _mode = m;
+      _liveMode = false;
+      _result = '';
+      _fullFrameArea = null;
+      if (m == MeasureMode.fullFrame) {
+        _info = '将手机对准地面/桌面，点击「测量整图面积」';
+      } else {
+        _info = '将手机对准地面/桌面，缓慢移动后点击屏幕打点';
+      }
+    });
+  }
+
+  // ============================================================
   //  UI
   // ============================================================
 
   @override
   Widget build(BuildContext context) {
+    final topPad = MediaQuery.of(context).padding.top;
+    final botPad = MediaQuery.of(context).padding.bottom;
+
     return Scaffold(
       body: Stack(children: [
         ARKitSceneView(
@@ -122,6 +218,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           onARKitViewCreated: _onARKitViewCreated,
         ),
 
+        // 检测框（两种模式都显示）
         if (_detecting)
           Positioned.fill(
             child: CustomPaint(
@@ -129,8 +226,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
             ),
           ),
 
+        // 顶部信息栏
         Positioned(
-          top: MediaQuery.of(context).padding.top + 12,
+          top: topPad + 12,
           left: 16,
           right: 16,
           child: Container(
@@ -147,9 +245,25 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           ),
         ),
 
+        // ✅ 模式切换（顶部第二行）
+        Positioned(
+          top: topPad + 62,
+          left: 16,
+          right: 16,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _modeChip('📐 整图面积', MeasureMode.fullFrame),
+              const SizedBox(width: 8),
+              _modeChip('✏️ 手动选点', MeasureMode.manual),
+            ],
+          ),
+        ),
+
+        // 钉螺计数（两种模式都显示）
         if (_detecting && _snailCount > 0)
           Positioned(
-            top: MediaQuery.of(context).padding.top + 70,
+            top: topPad + 110,
             right: 16,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -175,21 +289,26 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
             ),
           ),
 
-        Center(
-          child: Icon(Icons.add, color: Colors.white.withOpacity(0.6), size: 36),
-        ),
+        // 手动模式：中心十字准星
+        if (_mode == MeasureMode.manual)
+          Center(
+            child: Icon(Icons.add,
+                color: Colors.white.withOpacity(0.6), size: 36),
+          ),
 
+        // 底部控制区
         Positioned(
           left: 16,
           right: 16,
-          bottom: MediaQuery.of(context).padding.bottom + 16,
+          bottom: botPad + 16,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // ✅ 新增：置信度滑块（仅检测时显示）
+            // 置信度滑块
             if (_detecting)
               Container(
                 width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.black54,
                   borderRadius: BorderRadius.circular(12),
@@ -203,12 +322,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                         value: _conf,
                         min: 0.05,
                         max: 0.95,
-                        divisions: 18,                 // 步长 0.05
+                        divisions: 18,
                         activeColor: Colors.greenAccent,
                         label: _conf.toStringAsFixed(2),
                         onChanged: (v) {
-                          setState(() => _conf = v);   // 立刻刷新数字 + Dart 过滤
-                          _methodChannel.invokeMethod('setConf', v);  // 通知 native
+                          setState(() => _conf = v);
+                          _methodChannel.invokeMethod('setConf', v);
                         },
                       ),
                     ),
@@ -225,6 +344,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                 ),
               ),
 
+            // 结果展示
             if (_result.isNotEmpty)
               Container(
                 width: double.infinity,
@@ -246,25 +366,58 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                 ),
               ),
 
-            Row(children: [
-              _btn('清空', Icons.delete_outline, _clear),
-              const SizedBox(width: 10),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _pts.length >= 3 ? _showArea : null,
-                  icon: const Icon(Icons.crop_square),
-                  label: Text('测面积 (${_pts.length} 点)'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+            // ✅ 整图模式按钮
+            if (_mode == MeasureMode.fullFrame) ...[
+              Row(children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _measuring ? null : _measureFullFrame,
+                    icon: _measuring
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.crop_free),
+                    label: Text(_measuring ? '测量中...' : '测量整图面积'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
                   ),
                 ),
-              ),
-            ]),
+                const SizedBox(width: 10),
+                _btn(_liveMode ? '停止实时' : '实时测量',
+                    _liveMode ? Icons.pause_circle : Icons.play_circle,
+                    _toggleLive),
+              ]),
+            ],
+
+            // ✅ 手动模式按钮
+            if (_mode == MeasureMode.manual) ...[
+              Row(children: [
+                _btn('清空', Icons.delete_outline, _clear),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _pts.length >= 3 ? _showArea : null,
+                    icon: const Icon(Icons.crop_square),
+                    label: Text('测面积 (${_pts.length} 点)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+              ]),
+            ],
 
             const SizedBox(height: 10),
 
+            // 检测开关（两种模式共用）
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -281,6 +434,31 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           ]),
         ),
       ]),
+    );
+  }
+
+  // ✅ 模式切换 chip
+  Widget _modeChip(String label, MeasureMode m) {
+    final selected = _mode == m;
+    return GestureDetector(
+      onTap: () => _switchMode(m),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? Colors.greenAccent : Colors.black54,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+              color: selected ? Colors.greenAccent : Colors.white38),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Colors.black : Colors.white70,
+            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+            fontSize: 14,
+          ),
+        ),
+      ),
     );
   }
 
@@ -304,6 +482,8 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   void _onARKitViewCreated(ARKitController controller) {
     arkitController = controller;
     arkitController.onARTap = (ar) {
+      // ✅ 只有手动模式才响应打点
+      if (_mode != MeasureMode.manual) return;
       final point = ar.firstWhereOrNull(
         (o) => o.type == ARKitHitTestResultType.featurePoint,
       );
@@ -358,7 +538,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   }
 
   // ============================================================
-  //  测量逻辑
+  //  手动测量逻辑（不变）
   // ============================================================
 
   void _updateReadout() {
@@ -473,7 +653,7 @@ class DetectionPainter extends CustomPainter {
       canvas.drawRect(rect, fillPaint);
       canvas.drawRect(rect, boxPaint);
 
-      final label = '🐌 ${(d.confidence * 100).toStringAsFixed(0)}%';
+      final label = '钉螺 ${(d.confidence * 100).toStringAsFixed(0)}%';
       final tp = TextPainter(
         text: TextSpan(
           text: label,
