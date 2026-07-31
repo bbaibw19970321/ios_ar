@@ -14,6 +14,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var lastTime: CFTimeInterval = 0
     private let interval: CFTimeInterval = 0.1
     private var retryCount = 0
+    private var confThreshold: Float = 0.5          // ✅ 新增：动态阈值，默认与 Dart 一致
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
@@ -37,6 +38,12 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             startDetection(result: result)
         case "stop":
             stopDetection()
+            result(nil)
+        case "setConf":                              // ✅ 新增：接收滑块值
+            if let n = call.arguments as? NSNumber {
+                confThreshold = n.floatValue
+                print("🎚 conf threshold = \(confThreshold)")
+            }
             result(nil)
         default:
             result(FlutterMethodNotImplemented)
@@ -119,19 +126,20 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         lastTime = now
 
         let pixelBuffer = frame.capturedImage
+        let thr = confThreshold                      // ✅ 新增：本帧阈值快照
 
         // ---- 计算 aspect-fill 映射系数：相机图归一化 -> 屏幕归一化 ----
         let cw = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let ch = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        let rImg = min(cw, ch) / max(cw, ch)                 // 摆正竖图宽高比 (<1)
+        let rImg = min(cw, ch) / max(cw, ch)
         let scr = UIScreen.main.bounds.size
         let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
         let kx: CGFloat
         let ky: CGFloat
-        if rScr < rImg {     // 竖屏典型：左右被裁，水平放大
+        if rScr < rImg {
             kx = rImg / rScr
             ky = 1.0
-        } else {             // 上下被裁，垂直放大
+        } else {
             kx = 1.0
             ky = rScr / rImg
         }
@@ -142,14 +150,12 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                guard let top = o.labels.first, top.confidence > thr else { return nil }   // ✅ 改：0.3 -> thr
                 let b = o.boundingBox
-                // 1) 摆正竖图、左上原点归一化
                 let u = b.origin.x
                 let v = 1.0 - b.origin.y - b.height
                 let w = b.width
                 let h = b.height
-                // 2) aspect-fill 居中裁剪 -> 屏幕归一化（Dart 直接乘 size 即可）
                 let xN = 0.5 + (u - 0.5) * kx
                 let yN = 0.5 + (v - 0.5) * ky
                 let wN = w * kx

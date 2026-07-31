@@ -26,6 +26,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   List<Detection> _detections = [];
   bool _detecting = false;
   int _snailCount = 0;
+  double _conf = 0.5;   // ✅ 新增：置信度阈值，由滑块控制（想保持原手感改成 0.7）
 
   @override
   void dispose() {
@@ -97,7 +98,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.7).toList();
+      }).where((d) => d.confidence > _conf).toList();   // ✅ 改：0.7 -> _conf
 
       setState(() {
         _detections = list;
@@ -183,6 +184,47 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           right: 16,
           bottom: MediaQuery.of(context).padding.bottom + 16,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
+            // ✅ 新增：置信度滑块（仅检测时显示）
+            if (_detecting)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Text('置信度',
+                        style: TextStyle(color: Colors.white, fontSize: 13)),
+                    Expanded(
+                      child: Slider(
+                        value: _conf,
+                        min: 0.05,
+                        max: 0.95,
+                        divisions: 18,                 // 步长 0.05
+                        activeColor: Colors.greenAccent,
+                        label: _conf.toStringAsFixed(2),
+                        onChanged: (v) {
+                          setState(() => _conf = v);   // 立刻刷新数字 + Dart 过滤
+                          _methodChannel.invokeMethod('setConf', v);  // 通知 native
+                        },
+                      ),
+                    ),
+                    SizedBox(
+                      width: 34,
+                      child: Text(
+                        _conf.toStringAsFixed(2),
+                        style: const TextStyle(
+                            color: Colors.greenAccent, fontSize: 13),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
             if (_result.isNotEmpty)
               Container(
                 width: double.infinity,
