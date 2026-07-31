@@ -10,12 +10,10 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var displayLink: CADisplayLink?
     private var visionModel: VNCoreMLModel?
     private var arSession: ARSession?
-    private weak var arSCNView: ARSCNView?          // ✅ 新增：保存视图引用，用于 hitTest
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
     private let interval: CFTimeInterval = 0.1
     private var retryCount = 0
-    private var confThreshold: Float = 0.5
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
@@ -40,64 +38,10 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         case "stop":
             stopDetection()
             result(nil)
-        case "setConf":
-            if let n = call.arguments as? NSNumber {
-                confThreshold = n.floatValue
-                print("🎚 conf threshold = \(confThreshold)")
-            }
-            result(nil)
-        case "hitTestCorners":                       // ✅ 新增：四角 hitTest
-            hitTestCorners(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
     }
-
-    // ✅ 新增：屏幕四角 hitTest → 世界坐标
-    private func hitTestCorners(result: @escaping FlutterResult) {
-    guard let arView = arSCNView else {
-        print("❌ hitTestCorners: arSCNView is nil")
-        result(FlutterError(code: "NO_AR_VIEW", message: "AR视图未就绪，请等待2秒后重试", details: nil))
-        return
-    }
-    
-    let bounds = arView.bounds
-    let insets: CGFloat = 20
-    let points = [
-        CGPoint(x: bounds.minX + insets, y: bounds.minY + insets),
-        CGPoint(x: bounds.maxX - insets, y: bounds.minY + insets),
-        CGPoint(x: bounds.maxX - insets, y: bounds.maxY - insets),
-        CGPoint(x: bounds.minX + insets, y: bounds.maxY - insets),
-    ]
-    
-    var corners: [[Double]] = []
-    for (i, pt) in points.enumerated() {
-        // 先试 existingPlaneUsingExtent，失败再试 existingPlane，再试 estimatedHorizontalPlane
-        var hits = arView.hitTest(pt, types: [.existingPlaneUsingExtent])
-        if hits.isEmpty {
-            hits = arView.hitTest(pt, types: [.existingPlane])
-        }
-        if hits.isEmpty {
-            hits = arView.hitTest(pt, types: [.estimatedHorizontalPlane])
-        }
-        
-        guard let hit = hits.first else {
-            print("❌ hitTestCorners: 角点\(i) 未命中平面, point=\(pt)")
-            result(FlutterError(code: "NO_PLANE",
-                                message: "角点\(i+1)未检测到平面\n请对准地面/桌面，缓慢左右移动手机扫描",
-                                details: nil))
-            return
-        }
-        
-        let t = hit.worldTransform
-        let pos = [Double(t.columns.3.x), Double(t.columns.3.y), Double(t.columns.3.z)]
-        print("✅ hitTestCorners: 角点\(i) = \(pos)")
-        corners.append(pos)
-    }
-    
-    print("✅ hitTestCorners: 返回 \(corners.count) 个角点")
-    result(corners)
-}
 
     public func onListen(
         withArguments arguments: Any?,
@@ -175,19 +119,19 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         lastTime = now
 
         let pixelBuffer = frame.capturedImage
-        let thr = confThreshold
 
+        // ---- 计算 aspect-fill 映射系数：相机图归一化 -> 屏幕归一化 ----
         let cw = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let ch = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        let rImg = min(cw, ch) / max(cw, ch)
+        let rImg = min(cw, ch) / max(cw, ch)                 // 摆正竖图宽高比 (<1)
         let scr = UIScreen.main.bounds.size
         let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
         let kx: CGFloat
         let ky: CGFloat
-        if rScr < rImg {
+        if rScr < rImg {     // 竖屏典型：左右被裁，水平放大
             kx = rImg / rScr
             ky = 1.0
-        } else {
+        } else {             // 上下被裁，垂直放大
             kx = 1.0
             ky = rScr / rImg
         }
@@ -198,12 +142,14 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > thr else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
                 let b = o.boundingBox
+                // 1) 摆正竖图、左上原点归一化
                 let u = b.origin.x
                 let v = 1.0 - b.origin.y - b.height
                 let w = b.width
                 let h = b.height
+                // 2) aspect-fill 居中裁剪 -> 屏幕归一化（Dart 直接乘 size 即可）
                 let xN = 0.5 + (u - 0.5) * kx
                 let yN = 0.5 + (v - 0.5) * ky
                 let wN = w * kx
@@ -234,10 +180,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     }
 
     private func searchView(_ view: UIView) -> ARSession? {
-        if let arView = view as? ARSCNView {
-            arSCNView = arView                       // ✅ 新增：顺手保存视图引用
-            return arView.session
-        }
+        if let arView = view as? ARSCNView { return arView.session }
         for sub in view.subviews {
             if let s = searchView(sub) { return s }
         }
