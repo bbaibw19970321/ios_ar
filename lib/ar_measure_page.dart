@@ -123,10 +123,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
         if (_detecting)
           Positioned.fill(
+          child: IgnorePointer(          // 触摸事件穿透
             child: CustomPaint(
               painter: DetectionPainter(detections: _detections),
             ),
           ),
+        ),
 
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
