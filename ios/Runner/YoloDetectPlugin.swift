@@ -55,36 +55,49 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     // ✅ 新增：屏幕四角 hitTest → 世界坐标
     private func hitTestCorners(result: @escaping FlutterResult) {
-        guard let arView = arSCNView else {
-            result(FlutterError(code: "NO_AR_VIEW", message: "ARSCNView not found", details: nil))
+    guard let arView = arSCNView else {
+        print("❌ hitTestCorners: arSCNView is nil")
+        result(FlutterError(code: "NO_AR_VIEW", message: "AR视图未就绪，请等待2秒后重试", details: nil))
+        return
+    }
+    
+    let bounds = arView.bounds
+    let insets: CGFloat = 20
+    let points = [
+        CGPoint(x: bounds.minX + insets, y: bounds.minY + insets),
+        CGPoint(x: bounds.maxX - insets, y: bounds.minY + insets),
+        CGPoint(x: bounds.maxX - insets, y: bounds.maxY - insets),
+        CGPoint(x: bounds.minX + insets, y: bounds.maxY - insets),
+    ]
+    
+    var corners: [[Double]] = []
+    for (i, pt) in points.enumerated() {
+        // 先试 existingPlaneUsingExtent，失败再试 existingPlane，再试 estimatedHorizontalPlane
+        var hits = arView.hitTest(pt, types: [.existingPlaneUsingExtent])
+        if hits.isEmpty {
+            hits = arView.hitTest(pt, types: [.existingPlane])
+        }
+        if hits.isEmpty {
+            hits = arView.hitTest(pt, types: [.estimatedHorizontalPlane])
+        }
+        
+        guard let hit = hits.first else {
+            print("❌ hitTestCorners: 角点\(i) 未命中平面, point=\(pt)")
+            result(FlutterError(code: "NO_PLANE",
+                                message: "角点\(i+1)未检测到平面\n请对准地面/桌面，缓慢左右移动手机扫描",
+                                details: nil))
             return
         }
-        let bounds = arView.bounds
-        let insets: CGFloat = 12                     // 内缩 12pt，避免打到屏幕边缘无效区
-        let points = [
-            CGPoint(x: bounds.minX + insets, y: bounds.minY + insets),   // 左上
-            CGPoint(x: bounds.maxX - insets, y: bounds.minY + insets),   // 右上
-            CGPoint(x: bounds.maxX - insets, y: bounds.maxY - insets),   // 右下
-            CGPoint(x: bounds.minX + insets, y: bounds.maxY - insets),   // 左下
-        ]
-        var corners: [[Double]] = []
-        for pt in points {
-            let hits = arView.hitTest(pt, types: [.existingPlaneUsingExtent])
-            guard let hit = hits.first else {
-                result(FlutterError(code: "NO_PLANE",
-                                    message: "未检测到平面，请对准地面/桌面并缓慢移动手机",
-                                    details: nil))
-                return
-            }
-            let t = hit.worldTransform
-            corners.append([
-                Double(t.columns.3.x),
-                Double(t.columns.3.y),
-                Double(t.columns.3.z)
-            ])
-        }
-        result(corners)
+        
+        let t = hit.worldTransform
+        let pos = [Double(t.columns.3.x), Double(t.columns.3.y), Double(t.columns.3.z)]
+        print("✅ hitTestCorners: 角点\(i) = \(pos)")
+        corners.append(pos)
     }
+    
+    print("✅ hitTestCorners: 返回 \(corners.count) 个角点")
+    result(corners)
+}
 
     public func onListen(
         withArguments arguments: Any?,

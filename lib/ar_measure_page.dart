@@ -124,37 +124,57 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   // ============================================================
 
   Future<void> _measureFullFrame() async {
-    if (_measuring) return;
-    setState(() => _measuring = true);
-    try {
-      final raw = await _methodChannel.invokeMethod('hitTestCorners');
-      final corners = (raw as List)
-          .map((e) => vector.Vector3(
-                (e[0] as num).toDouble(),
-                (e[1] as num).toDouble(),
-                (e[2] as num).toDouble(),
-              ))
-          .toList();
-      final area = _shoelace3D(corners);
-      if (mounted) {
-        setState(() {
-          _fullFrameArea = area;
-          _result = '📐 整图面积：${_fmtArea(area)}';
-          _info = _snailCount > 0
-              ? '🐌 密度：${(_snailCount / area).toStringAsFixed(1)} 只/m²'
-              : '测量完成，移动手机可重新测量';
-        });
-      }
-    } on PlatformException catch (e) {
-      if (mounted) {
-        setState(() => _info = '⚠️ ${e.message ?? "测量失败，请对准平面"}');
-      }
-    } catch (e) {
-      if (mounted) setState(() => _info = '⚠️ 测量失败: $e');
-    } finally {
-      if (mounted) setState(() => _measuring = false);
+  if (_measuring) return;
+  setState(() {
+    _measuring = true;
+    _info = '⏳ 正在测量...请保持手机稳定对准平面';
+  });
+  try {
+    final raw = await _methodChannel.invokeMethod('hitTestCorners');
+    print('📐 hitTestCorners 返回: $raw');
+    
+    final corners = (raw as List)
+        .map((e) => vector.Vector3(
+              (e[0] as num).toDouble(),
+              (e[1] as num).toDouble(),
+              (e[2] as num).toDouble(),
+            ))
+        .toList();
+    
+    final area = _shoelace3D(corners);
+    print('📐 计算面积: $area m²');
+    
+    if (mounted) {
+      setState(() {
+        _fullFrameArea = area;
+        _result = '📐 整图面积：${_fmtArea(area)}';
+        _info = _snailCount > 0
+            ? '🐌 密度：${(_snailCount / area).toStringAsFixed(1)} 只/m²'
+            : '✅ 测量完成，移动手机可重新测量';
+      });
     }
+  } on PlatformException catch (e) {
+    print('❌ 测量失败: ${e.code} - ${e.message}');
+    if (mounted) {
+      setState(() {
+        _info = '⚠️ ${e.message ?? "测量失败"}';
+        _result = '';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('测量失败: ${e.message}'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  } catch (e) {
+    print('❌ 测量异常: $e');
+    if (mounted) setState(() => _info = '⚠️ 测量异常: $e');
+  } finally {
+    if (mounted) setState(() => _measuring = false);
   }
+}
 
   /// 3D 多边形面积（鞋带公式 + 叉积）
   double _shoelace3D(List<vector.Vector3> pts) {
@@ -215,6 +235,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       body: Stack(children: [
         ARKitSceneView(
           enableTapRecognizer: true,
+          planeDetection: ARPlaneDetection.horizontalAndVertical,
           onARKitViewCreated: _onARKitViewCreated,
         ),
 
