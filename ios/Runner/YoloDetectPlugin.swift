@@ -142,7 +142,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.8 else { return nil }
                 let b = o.boundingBox
                 // 1) 摆正竖图、左上原点归一化
                 let u = b.origin.x
