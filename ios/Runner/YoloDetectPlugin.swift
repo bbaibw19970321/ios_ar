@@ -67,34 +67,33 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     // MARK: - ✅ 改进6: 在 native 内部完成投影+插值+hitTest（避免坐标系问题）
 
     private func handleInterpolateWorld(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        guard let args = call.arguments as? [String: Any],
-              let ax = args["ax"] as? Double, let ay = args["ay"] as? Double, let az = args["az"] as? Double,
-              let bx = args["bx"] as? Double, let by = args["by"] as? Double, let bz = args["bz"] as? Double,
-              let steps = args["steps"] as? Int else {
-            result(FlutterError(code: "BAD_ARGS", message: "need ax..bz, steps", details: nil))
-            return
-        }
-        guard let view = ensureARView() else { result([]); return }
-
-        let types: ARHitTestResult.ResultType = [.existingPlaneUsingExtent, .existingPlane, .estimatedHorizontalPlane, .featurePoint]
-
-        // 世界坐标 → 屏幕坐标（ARSCNView 内部坐标系，不会错位）
-        let pA = view.projectPoint(SCNVector3(Float(ax), Float(ay), Float(az)))
-        let pB = view.projectPoint(SCNVector3(Float(bx), Float(by), Float(bz)))
-
-        var points: [[String: Double]] = []
-        for i in 1..<steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            let sx = pA.x + (pB.x - pA.x) * t
-            let sy = pA.y + (pB.y - pA.y) * t
-            if let hit = view.hitTest(CGPoint(x: sx, y: sy), types: types).first {
-                let c = hit.worldTransform.columns.3
-                points.append(["x": Double(c.x), "y": Double(c.y), "z": Double(c.z)])
-            }
-        }
-        result(points)
+    guard let args = call.arguments as? [String: Any],
+          let ax = args["ax"] as? Double, let ay = args["ay"] as? Double, let az = args["az"] as? Double,
+          let bx = args["bx"] as? Double, let by = args["by"] as? Double, let bz = args["bz"] as? Double,
+          let steps = args["steps"] as? Int else {
+        result(FlutterError(code: "BAD_ARGS", message: "need ax..bz, steps", details: nil))
+        return
     }
+    guard let view = ensureARView() else { result([]); return }
 
+    let types: ARHitTestResult.ResultType = [.existingPlaneUsingExtent, .existingPlane, .estimatedHorizontalPlane, .featurePoint]
+
+    let pA = view.projectPoint(SCNVector3(Float(ax), Float(ay), Float(az)))
+    let pB = view.projectPoint(SCNVector3(Float(bx), Float(by), Float(bz)))
+
+    var points: [[String: Double]] = []
+    for i in 1..<steps {
+        let t = Float(i) / Float(steps)                          // ✅ Float
+        let sx = pA.x + (pB.x - pA.x) * t                       // ✅ Float * Float
+        let sy = pA.y + (pB.y - pA.y) * t                       // ✅ Float * Float
+        let screenPt = CGPoint(x: CGFloat(sx), y: CGFloat(sy))   // ✅ 转 CGFloat
+        if let hit = view.hitTest(screenPt, types: types).first {
+            let c = hit.worldTransform.columns.3
+            points.append(["x": Double(c.x), "y": Double(c.y), "z": Double(c.z)])
+        }
+    }
+    result(points)
+}
     // MARK: - 工具
 
     private func ensureARView() -> ARSCNView? {
