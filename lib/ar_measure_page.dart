@@ -27,6 +27,11 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
+  // ✅ 连续 3 帧确认
+  List<Detection> _prevDetections = [];
+  final Map<String, int> _hitCount = {};
+  static const int _stableFrames = 3;
+
   @override
   void dispose() {
     _stopDetection();
@@ -79,15 +84,18 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _detecting = false;
         _detections = [];
         _snailCount = 0;
+        _prevDetections = [];
+        _hitCount.clear();
         _info = '检测已停止';
       });
     }
   }
 
+  // ✅ 连续 3 帧命中才显示
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
     try {
-      final list = (data as List).map((e) {
+      final current = (data as List).map((e) {
         final m = Map<String, dynamic>.from(e);
         return Detection(
           x: (m['x'] as num).toDouble(),
@@ -99,13 +107,57 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         );
       }).where((d) => d.confidence > 0.8).toList();
 
+      final newHitCount = <String, int>{};
+      final stable = <Detection>[];
+
+      for (final c in current) {
+        final matched = _prevDetections.any((p) => _iou(c, p) > 0.4);
+        final key = _detectionKey(c);
+
+        if (matched) {
+          final count = (_hitCount[key] ?? 1) + 1;
+          newHitCount[key] = count;
+          if (count >= _stableFrames) {
+            stable.add(c);
+          }
+        } else {
+          newHitCount[key] = 1;
+        }
+      }
+
+      _prevDetections = current;
+      _hitCount
+        ..clear()
+        ..addAll(newHitCount);
+
       setState(() {
-        _detections = list;
-        _snailCount = list.length;
+        _detections = stable;
+        _snailCount = stable.length;
       });
     } catch (e) {
       debugPrint('⚠️ 解析检测结果出错: $e');
     }
+  }
+
+  /// 将屏幕分成 10×10 网格，同格视为同一目标
+  String _detectionKey(Detection d) {
+    final gx = (d.x * 10).floor().clamp(0, 9);
+    final gy = (d.y * 10).floor().clamp(0, 9);
+    return '${d.label}_${gx}_$gy';
+  }
+
+  double _iou(Detection a, Detection b) {
+    final ax2 = a.x + a.w, ay2 = a.y + a.h;
+    final bx2 = b.x + b.w, by2 = b.y + b.h;
+    final ix1 = a.x > b.x ? a.x : b.x;
+    final iy1 = a.y > b.y ? a.y : b.y;
+    final ix2 = ax2 < bx2 ? ax2 : bx2;
+    final iy2 = ay2 < by2 ? ay2 : by2;
+    final iw = ix2 - ix1, ih = iy2 - iy1;
+    if (iw <= 0 || ih <= 0) return 0;
+    final inter = iw * ih;
+    final union = a.w * a.h + b.w * b.h - inter;
+    return union > 0 ? inter / union : 0;
   }
 
   // ============================================================
@@ -123,12 +175,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
         if (_detecting)
           Positioned.fill(
-          child: IgnorePointer(          // 触摸事件穿透
-            child: CustomPaint(
-              painter: DetectionPainter(detections: _detections),
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: DetectionPainter(detections: _detections),
+              ),
             ),
           ),
-        ),
 
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
