@@ -30,7 +30,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   // ✅ 连续 3 帧确认
   List<Detection> _prevDetections = [];
   final Map<String, int> _hitCount = {};
-  static const int _stableFrames = 3;
+  static const int _stableFrames = 2;
 
   @override
   void dispose() {
