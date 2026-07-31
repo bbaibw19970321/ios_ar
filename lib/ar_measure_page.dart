@@ -141,7 +141,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           _fullFrameArea = area;
           _result = '📐 整图面积：${_fmtArea(area)}';
           _info = _snailCount > 0
-              ? '🐌 密度：${_snailCount / area.toStringAsFixed(1)} 只/m²'
+              ? '🐌 密度：${(_snailCount / area).toStringAsFixed(1)} 只/m²'
               : '测量完成，移动手机可重新测量';
         });
       }
