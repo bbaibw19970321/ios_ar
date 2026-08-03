@@ -27,7 +27,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
-  // ✅ 连续 3 帧确认
+  // ✅ 连续 帧确认
   List<Detection> _prevDetections = [];
   final Map<String, int> _hitCount = {};
   static const int _stableFrames = 2;
@@ -105,7 +105,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.1).toList();
+      }).where((d) => d.confidence > 0.7).toList();
 
       final newHitCount = <String, int>{};
       final stable = <Detection>[];
