@@ -120,26 +120,14 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
-        // ---- 相机 buffer 原始尺寸（横屏 1920x1080）----
+        // 相机 buffer 横屏 1920x1080，orientation .right → 有效竖图 1080x1920
         let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
         let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
+        let imgW = bufH   // 1080（有效宽）
+        let imgH = bufW   // 1920（有效高）
 
-        // orientation = .right → 有效竖图
-        let imgW = bufH   // 1080
-        let imgH = bufW   // 1920
-
-        // ---- ✅ 修复①：.scaleFit letterbox 参数（模型输入 1280x1280）----
-        let modelSize: CGFloat = 1280.0
-        let scale = min(modelSize / imgW, modelSize / imgH)  // min(1.185, 0.667) = 0.667
-        let scaledW = imgW * scale   // 720
-        let scaledH = imgH * scale   // 1280
-        let padXN = ((modelSize - scaledW) / 2.0) / modelSize  // 0.21875
-        let padYN = ((modelSize - scaledH) / 2.0) / modelSize  // 0.0
-        let scaledWN = scaledW / modelSize   // 0.5625
-        let scaledHN = scaledH / modelSize   // 1.0
-
-        // ---- aspect-fill 映射：相机图归一化 → 屏幕归一化 ----
-        let rImg = min(imgW, imgH) / max(imgW, imgH)
+        // aspect-fill 映射：相机图归一化 → 屏幕归一化
+        let rImg = min(imgW, imgH) / max(imgW, imgH)   // 0.5625
         let scr = UIScreen.main.bounds.size
         let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
         let kx: CGFloat
@@ -161,24 +149,12 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 guard let top = o.labels.first, top.confidence > 0.8 else { return nil }
                 let b = o.boundingBox
 
-                // 模型坐标（左下原点）→ 左上原点
-                let uModel = b.origin.x
-                let vModel = 1.0 - b.origin.y - b.height
-
-                // ✅ 去掉 letterbox padding → 相机图归一化
-                let uImg = (uModel - padXN) / scaledWN
-                let vImg = (vModel - padYN) / scaledHN
-                let wImg = b.width / scaledWN
-                let hImg = b.height / scaledHN
-
-                // 越界过滤（黑边区域的框丢弃）
-                guard uImg + wImg > 0, vImg + hImg > 0, uImg < 1, vImg < 1 else {
-                    return nil
-                }
-                let u = max(0, uImg)
-                let v = max(0, vImg)
-                let w = min(wImg, 1.0 - u)
-                let h = min(hImg, 1.0 - v)
+                // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
+                // 只需：左下原点 → 左上原点
+                let u = b.origin.x
+                let v = 1.0 - b.origin.y - b.height
+                let w = b.width
+                let h = b.height
 
                 // aspect-fill → 屏幕归一化
                 let xN = 0.5 + (u - 0.5) * kx
@@ -198,7 +174,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             DispatchQueue.main.async { sink(boxes) }
         }
 
-        // ✅ 修复①：等比缩放 + 黑边填充（对齐 PyTorch letterbox）
+        // ✅ .scaleFit：等比缩放+黑边，Vision 内部处理 letterbox 并自动反算坐标
         request.imageCropAndScaleOption = .scaleFit
 
         let handler = VNImageRequestHandler(
