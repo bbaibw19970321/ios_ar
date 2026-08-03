@@ -1,18 +1,18 @@
 {
     "fileFormatVersion": "1.0.0",
     "itemInfoEntries": {
-        "b0362060-af3e-402e-b7e1-5284d9572800": {
-            "author": "com.apple.CoreML",
-            "description": "CoreML Model Weights",
-            "name": "weights",
-            "path": "com.apple.CoreML/weights"
-        },
-        "bb4250be-eeed-4dfb-a439-6bdd83c1ea1b": {
+        "ac37dd53-bfc1-4654-b3d5-98bccda4d61e": {
             "author": "com.apple.CoreML",
             "description": "CoreML Model Specification",
             "name": "model.mlmodel",
             "path": "com.apple.CoreML/model.mlmodel"
+        },
+        "dda7ca58-81bf-4a35-b675-9b84687bf5ac": {
+            "author": "com.apple.CoreML",
+            "description": "CoreML Model Weights",
+            "name": "weights",
+            "path": "com.apple.CoreML/weights"
         }
     },
-    "rootModelIdentifier": "bb4250be-eeed-4dfb-a439-6bdd83c1ea1b"
+    "rootModelIdentifier": "ac37dd53-bfc1-4654-b3d5-98bccda4d61e"
 }
