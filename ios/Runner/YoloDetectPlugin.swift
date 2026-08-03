@@ -146,7 +146,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.6 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.1 else { return nil }
                 let b = o.boundingBox
 
                 // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
