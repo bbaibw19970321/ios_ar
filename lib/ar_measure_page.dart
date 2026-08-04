@@ -30,8 +30,8 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   // ✅ 新增：软跟踪器
   final Map<String, TrackedObject> _trackedObjects = {};
   int _trackIdCounter = 0;
-  static const double _emaAlpha = 0.3;
-  static const double _matchThreshold = 0.15;
+  static const double _emaAlpha = 0.5;
+  static const double _matchThreshold = 0.2;
 
   @override
   void dispose() {
@@ -102,7 +102,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.4).toList();
+      }).where((d) => d.confidence > 0.5).toList();
 
       // 1. 标记所有已有目标为 missed
       for (final obj in _trackedObjects.values) {
@@ -375,7 +375,7 @@ class TrackedObject {
 
   void markMissed() => missCount++;
 
-  bool get isVisible => hitCount >= 3 && missCount <= 5;
+  bool get isVisible => hitCount >= 2 && missCount <= 8;
   bool get isDead => missCount > 10;
 }
 

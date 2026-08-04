@@ -152,7 +152,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 }
                 let boxes: [[String: Any]] = obs.compactMap { o in
                     // ✅ 置信度降至 0.3，由 Dart 端跟踪器负责过滤
-                    guard let top = o.labels.first, top.confidence > 0.4 else { return nil }
+                    guard let top = o.labels.first, top.confidence > 0.5 else { return nil }
                     let b = o.boundingBox
                     let u = b.origin.x
                     let v = 1.0 - b.origin.y - b.height
