@@ -110,9 +110,9 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     @objc private func tick() {
         guard isRunning,
-              let sink = eventSink,
-              let model = visionModel,
-              let frame = arSession?.currentFrame else { return }
+            let sink = eventSink,
+            let model = visionModel,
+            let frame = arSession?.currentFrame else { return }
 
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
@@ -120,70 +120,74 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
-        // 相机 buffer 横屏 1920x1080，orientation .right → 有效竖图 1080x1920
-        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
-        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
-        let imgW = bufH   // 1080（有效宽）
-        let imgH = bufW   // 1920（有效高）
-
-        // aspect-fill 映射：相机图归一化 → 屏幕归一化
-        let rImg = min(imgW, imgH) / max(imgW, imgH)   // 0.5625
-        let scr = UIScreen.main.bounds.size
-        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
-        let kx: CGFloat
-        let ky: CGFloat
-        if rScr < rImg {
-            kx = rImg / rScr
-            ky = 1.0
-        } else {
-            kx = 1.0
-            ky = rScr / rImg
+        // ✅ 拷贝 buffer，避免后台队列访问时被覆盖
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        var copyBuffer: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                            CVPixelBufferGetPixelFormatType(pixelBuffer),
+                            nil, &copyBuffer)
+        guard let safeBuffer = copyBuffer else { return }
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        CVPixelBufferLockBaseAddress(safeBuffer, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+            CVPixelBufferUnlockBaseAddress(safeBuffer, [])
         }
+        
+        // 逐行拷贝
+        let srcBase = CVPixelBufferGetBaseAddress(pixelBuffer)!
+        let dstBase = CVPixelBufferGetBaseAddress(safeBuffer)!
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        memcpy(dstBase, srcBase, bytesPerRow * height)
 
-        let request = VNCoreMLRequest(model: model) { req, _ in
-            guard let obs = req.results as? [VNRecognizedObjectObservation] else {
-                DispatchQueue.main.async { sink([]) }
-                return
+        // ✅ 后台队列执行推理，不阻塞 displayLink
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self, self.isRunning else { return }
+
+            let request = VNCoreMLRequest(model: model) { req, _ in
+                guard let obs = req.results as? [VNRecognizedObjectObservation] else {
+                    DispatchQueue.main.async { sink([]) }
+                    return
+                }
+                let boxes: [[String: Any]] = obs.compactMap { o in
+                    // ✅ 置信度降至 0.3，由 Dart 端跟踪器负责过滤
+                    guard let top = o.labels.first, top.confidence > 0.4 else { return nil }
+                    let b = o.boundingBox
+                    let u = b.origin.x
+                    let v = 1.0 - b.origin.y - b.height
+                    let w = b.width
+                    let h = b.height
+
+                    // aspect-fill → 屏幕归一化（保持你原有的映射逻辑）
+                    let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+                    let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+                    let imgW = bufH, imgH = bufW
+                    let rImg = min(imgW, imgH) / max(imgW, imgH)
+                    let scr = UIScreen.main.bounds.size
+                    let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
+                    let kx: CGFloat, ky: CGFloat
+                    if rScr < rImg { kx = rImg / rScr; ky = 1.0 }
+                    else           { kx = 1.0; ky = rScr / rImg }
+
+                    let xN = 0.5 + (u - 0.5) * kx
+                    let yN = 0.5 + (v - 0.5) * ky
+                    let wN = w * kx
+                    let hN = h * ky
+
+                    return ["x": xN, "y": yN, "w": wN, "h": hN,
+                            "conf": top.confidence, "label": top.identifier]
+                }
+                DispatchQueue.main.async { sink(boxes) }
             }
-            let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.5 else { return nil }
-                let b = o.boundingBox
 
-                // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
-                // 只需：左下原点 → 左上原点
-                let u = b.origin.x
-                let v = 1.0 - b.origin.y - b.height
-                let w = b.width
-                let h = b.height
+            // ✅ scaleFill 与 Flutter ARKit 预览铺满模式一致
+            request.imageCropAndScaleOption = .scaleFill
 
-                // aspect-fill → 屏幕归一化
-                let xN = 0.5 + (u - 0.5) * kx
-                let yN = 0.5 + (v - 0.5) * ky
-                let wN = w * kx
-                let hN = h * ky
-
-                return [
-                    "x": xN,
-                    "y": yN,
-                    "w": wN,
-                    "h": hN,
-                    "conf": top.confidence,
-                    "label": top.identifier
-                ]
-            }
-            DispatchQueue.main.async { sink(boxes) }
+            let handler = VNImageRequestHandler(cvPixelBuffer: safeBuffer, orientation: .right)
+            try? handler.perform([request])
         }
-
-        // ✅ .scaleFit：等比缩放+黑边，Vision 内部处理 letterbox 并自动反算坐标
-        request.imageCropAndScaleOption = .scaleFit
-
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: pixelBuffer,
-            orientation: .right
-        )
-        try? handler.perform([request])
     }
-
     private func findARSession() -> ARSession? {
         guard let window = UIApplication.shared.windows.first else { return nil }
         return searchView(window)
