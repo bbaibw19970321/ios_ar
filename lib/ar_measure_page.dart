@@ -105,7 +105,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.7).toList();
+      }).where((d) => d.confidence > 0.5).toList();
 
       final newHitCount = <String, int>{};
       final stable = <Detection>[];
