@@ -110,9 +110,9 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
     @objc private func tick() {
         guard isRunning,
-            let sink = eventSink,
-            let model = visionModel,
-            let frame = arSession?.currentFrame else { return }
+              let sink = eventSink,
+              let model = visionModel,
+              let frame = arSession?.currentFrame else { return }
 
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
@@ -120,74 +120,51 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
-        // ✅ 拷贝 buffer，避免后台队列访问时被覆盖
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        var copyBuffer: CVPixelBuffer?
-        CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                            CVPixelBufferGetPixelFormatType(pixelBuffer),
-                            nil, &copyBuffer)
-        guard let safeBuffer = copyBuffer else { return }
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        CVPixelBufferLockBaseAddress(safeBuffer, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
-            CVPixelBufferUnlockBaseAddress(safeBuffer, [])
-        }
-        
-        // 逐行拷贝
-        let srcBase = CVPixelBufferGetBaseAddress(pixelBuffer)!
-        let dstBase = CVPixelBufferGetBaseAddress(safeBuffer)!
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        memcpy(dstBase, srcBase, bytesPerRow * height)
-
-        // ✅ 后台队列执行推理，不阻塞 displayLink
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            guard let self = self, self.isRunning else { return }
-
-            let request = VNCoreMLRequest(model: model) { req, _ in
-                guard let obs = req.results as? [VNRecognizedObjectObservation] else {
-                    DispatchQueue.main.async { sink([]) }
-                    return
-                }
-                let boxes: [[String: Any]] = obs.compactMap { o in
-                    // ✅ 置信度降至 0.3，由 Dart 端跟踪器负责过滤
-                    guard let top = o.labels.first, top.confidence > 0.5 else { return nil }
-                    let b = o.boundingBox
-                    let u = b.origin.x
-                    let v = 1.0 - b.origin.y - b.height
-                    let w = b.width
-                    let h = b.height
-
-                    // aspect-fill → 屏幕归一化（保持你原有的映射逻辑）
-                    let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-                    let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-                    let imgW = bufH, imgH = bufW
-                    let rImg = min(imgW, imgH) / max(imgW, imgH)
-                    let scr = UIScreen.main.bounds.size
-                    let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
-                    let kx: CGFloat, ky: CGFloat
-                    if rScr < rImg { kx = rImg / rScr; ky = 1.0 }
-                    else           { kx = 1.0; ky = rScr / rImg }
-
-                    let xN = 0.5 + (u - 0.5) * kx
-                    let yN = 0.5 + (v - 0.5) * ky
-                    let wN = w * kx
-                    let hN = h * ky
-
-                    return ["x": xN, "y": yN, "w": wN, "h": hN,
-                            "conf": top.confidence, "label": top.identifier]
-                }
-                DispatchQueue.main.async { sink(boxes) }
+        let request = VNCoreMLRequest(model: model) { req, _ in
+            guard let obs = req.results as? [VNRecognizedObjectObservation] else {
+                DispatchQueue.main.async { sink([]) }
+                return
             }
+            let boxes: [[String: Any]] = obs.compactMap { o in
+                guard let top = o.labels.first, top.confidence > 0.5 else { return nil }
+                let b = o.boundingBox
 
-            // ✅ scaleFill 与 Flutter ARKit 预览铺满模式一致
-            request.imageCropAndScaleOption = .scaleFill
+                // ✅ .scaleFill 模式下 Vision 已处理裁剪+缩放
+                // boundingBox 原点在左下角，Flutter Canvas 原点在左上角
+                // 只需翻转 Y 轴，不再需要手动 aspect-fill 映射
+                let xN = b.origin.x
+                let yN = 1.0 - b.origin.y - b.height
+                let wN = b.width
+                let hN = b.height
 
-            let handler = VNImageRequestHandler(cvPixelBuffer: safeBuffer, orientation: .right)
-            try? handler.perform([request])
+                // ✅ 钳制到 [0,1] 防止越界导致框不可见
+                let cx = max(0.0, min(1.0, xN))
+                let cy = max(0.0, min(1.0, yN))
+                let cw = max(0.0, min(1.0 - cx, wN))
+                let ch = max(0.0, min(1.0 - cy, hN))
+
+                return [
+                    "x": cx,
+                    "y": cy,
+                    "w": cw,
+                    "h": ch,
+                    "conf": top.confidence,
+                    "label": top.identifier
+                ]
+            }
+            DispatchQueue.main.async { sink(boxes) }
         }
+
+        // ✅ .scaleFill：Vision 内部完成裁剪+缩放，坐标已是屏幕归一化空间
+        request.imageCropAndScaleOption = .scaleFill
+
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: pixelBuffer,
+            orientation: .right
+        )
+        try? handler.perform([request])
     }
+
     private func findARSession() -> ARSession? {
         guard let window = UIApplication.shared.windows.first else { return nil }
         return searchView(window)

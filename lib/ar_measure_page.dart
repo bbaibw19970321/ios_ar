@@ -27,11 +27,15 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
-  // ✅ 新增：软跟踪器
-  final Map<String, TrackedObject> _trackedObjects = {};
-  int _trackIdCounter = 0;
-  static const double _emaAlpha = 0.5;
-  static const double _matchThreshold = 0.2;
+  // ✅ 稳妥去抖跟踪器
+  final Map<String, StableTrack> _tracks = {};
+  int _nextTrackId = 0;
+
+  // 去抖参数
+  static const int _confirmHits = 2;       // 连续命中N帧才显示
+  static const int _maxMisses = 8;         // 连续丢失N帧才销毁
+  static const double _iouThreshold = 0.15; // IoU匹配阈值
+  static const double _confWeightMin = 0.5; // 最低参与融合的置信度
 
   @override
   void dispose() {
@@ -81,18 +85,19 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _detecting = false;
         _detections = [];
         _snailCount = 0;
-        _trackedObjects.clear();
-        _trackIdCounter = 0;
+        _tracks.clear();
+        _nextTrackId = 0;
         _info = '检测已停止';
       });
     }
   }
 
-  // ✅ 全新跟踪逻辑：EMA平滑 + 软状态机
+  // ✅ 稳妥去抖：IoU贪心匹配 + 置信度加权融合 + 状态机确认
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
     try {
-      final current = (data as List).map((e) {
+      // 1. 解析原始检测
+      final raw = (data as List).map((e) {
         final m = Map<String, dynamic>.from(e);
         return Detection(
           x: (m['x'] as num).toDouble(),
@@ -102,53 +107,47 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.5).toList();
+      }).where((d) => d.confidence >= _confWeightMin).toList();
 
-      // 1. 标记所有已有目标为 missed
-      for (final obj in _trackedObjects.values) {
-        obj.markMissed();
-      }
+      // 2. 所有已有轨迹标记为未匹配
+      for (final t in _tracks.values) t.matched = false;
 
-      // 2. 贪心匹配
-      final matched = <String>{};
-      for (final det in current) {
+      // 3. 贪心 IoU 匹配
+      final matchedTrackIds = <String>{};
+      for (final det in raw) {
         String? bestId;
-        double bestDist = _matchThreshold * _matchThreshold;
+        double bestIou = _iouThreshold;
 
-        for (final entry in _trackedObjects.entries) {
-          if (matched.contains(entry.key)) continue;
-          final dx = (det.x + det.w / 2) - (entry.value.sx + entry.value.sw / 2);
-          final dy = (det.y + det.h / 2) - (entry.value.sy + entry.value.sh / 2);
-          final distSq = dx * dx + dy * dy;
-          if (distSq < bestDist) {
-            bestDist = distSq;
+        for (final entry in _tracks.entries) {
+          if (matchedTrackIds.contains(entry.key)) continue;
+          final iou = _computeIoU(det, entry.value.smoothed);
+          if (iou > bestIou) {
+            bestIou = iou;
             bestId = entry.key;
           }
         }
 
         if (bestId != null) {
-          _trackedObjects[bestId]!.update(det, _emaAlpha);
-          matched.add(bestId);
+          _tracks[bestId]!.update(det);
+          matchedTrackIds.add(bestId);
         } else {
-          final id = 't_${_trackIdCounter++}';
-          _trackedObjects[id] = TrackedObject(id, det);
+          final id = 't_${_nextTrackId++}';
+          _tracks[id] = StableTrack(id, det);
         }
       }
 
-      // 3. 清理死亡目标
-      _trackedObjects.removeWhere((_, v) => v.isDead);
+      // 4. 未匹配的轨迹计入 miss
+      for (final t in _tracks.values) {
+        if (!t.matched) t.miss();
+      }
 
-      // 4. 提取可见目标
-      final visible = _trackedObjects.values
-          .where((o) => o.isVisible)
-          .map((o) => Detection(
-                x: o.sx,
-                y: o.sy,
-                w: o.sw,
-                h: o.sh,
-                confidence: o.det.confidence,
-                label: o.det.label,
-              ))
+      // 5. 清理死亡轨迹
+      _tracks.removeWhere((_, t) => t.isDead);
+
+      // 6. 提取已确认的可见目标
+      final visible = _tracks.values
+          .where((t) => t.isConfirmed)
+          .map((t) => t.smoothed)
           .toList();
 
       setState(() {
@@ -156,12 +155,30 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _snailCount = visible.length;
       });
     } catch (e) {
-      debugPrint('⚠️ 解析检测结果出错: $e');
+      debugPrint('⚠️ 跟踪处理异常: $e');
     }
   }
 
+  double _computeIoU(Detection a, Detection b) {
+    final ax2 = a.x + a.w, ay2 = a.y + a.h;
+    final bx2 = b.x + b.w, by2 = b.y + b.h;
+
+    final ix1 = a.x > b.x ? a.x : b.x;
+    final iy1 = a.y > b.y ? a.y : b.y;
+    final ix2 = ax2 < bx2 ? ax2 : bx2;
+    final iy2 = ay2 < by2 ? ay2 : by2;
+
+    final iw = ix2 - ix1;
+    final ih = iy2 - iy1;
+    if (iw <= 0 || ih <= 0) return 0.0;
+
+    final inter = iw * ih;
+    final union = a.w * a.h + b.w * b.h - inter;
+    return union > 0 ? inter / union : 0.0;
+  }
+
   // ============================================================
-  //  UI（完全不变，仅保留原有结构）
+  //  UI
   // ============================================================
 
   @override
@@ -172,44 +189,92 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           enableTapRecognizer: true,
           onARKitViewCreated: _onARKitViewCreated,
         ),
+
         if (_detecting)
           Positioned.fill(
             child: IgnorePointer(
-              child: CustomPaint(painter: DetectionPainter(detections: _detections)),
+              child: CustomPaint(
+                painter: DetectionPainter(detections: _detections),
+              ),
             ),
           ),
+
         Positioned(
           top: MediaQuery.of(context).padding.top + 12,
-          left: 16, right: 16,
+          left: 16,
+          right: 16,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
-            child: Text(_info, style: const TextStyle(color: Colors.white, fontSize: 14), textAlign: TextAlign.center),
-          ),
-        ),
-        if (_detecting && _snailCount > 0)
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 70, right: 16,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(color: Colors.red.withOpacity(0.85), borderRadius: BorderRadius.circular(20)),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.bug_report, color: Colors.white, size: 18),
-                const SizedBox(width: 6),
-                Text('🐌 ×$_snailCount', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-              ]),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              _info,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+              textAlign: TextAlign.center,
             ),
           ),
-        Center(child: Icon(Icons.add, color: Colors.white.withOpacity(0.6), size: 36)),
+        ),
+
+        if (_detecting && _snailCount > 0)
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 70,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.85),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.bug_report, color: Colors.white, size: 18),
+                  const SizedBox(width: 6),
+                  Text(
+                    '🐌 ×$_snailCount',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+        Center(
+          child: Icon(Icons.add, color: Colors.white.withOpacity(0.6), size: 36),
+        ),
+
         Positioned(
-          left: 16, right: 16, bottom: MediaQuery.of(context).padding.bottom + 16,
+          left: 16,
+          right: 16,
+          bottom: MediaQuery.of(context).padding.bottom + 16,
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             if (_result.isNotEmpty)
               Container(
-                width: double.infinity, padding: const EdgeInsets.all(14), margin: const EdgeInsets.only(bottom: 10),
-                decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(12)),
-                child: Text(_result, style: const TextStyle(color: Colors.greenAccent, fontSize: 24, fontWeight: FontWeight.bold, height: 1.4), textAlign: TextAlign.center),
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  _result,
+                  style: const TextStyle(
+                    color: Colors.greenAccent,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    height: 1.4,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
               ),
+
             Row(children: [
               _btn('清空', Icons.delete_outline, _clear),
               const SizedBox(width: 10),
@@ -218,11 +283,17 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
                   onPressed: _pts.length >= 3 ? _showArea : null,
                   icon: const Icon(Icons.crop_square),
                   label: Text('测面积 (${_pts.length} 点)'),
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
                 ),
               ),
             ]),
+
             const SizedBox(height: 10),
+
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
@@ -244,21 +315,30 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
   Widget _btn(String label, IconData icon, VoidCallback onTap) {
     return ElevatedButton.icon(
-      onPressed: onTap, icon: Icon(icon), label: Text(label),
-      style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[800], foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16)),
+      onPressed: onTap,
+      icon: Icon(icon),
+      label: Text(label),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.grey[800],
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+      ),
     );
   }
 
   // ============================================================
-  //  AR 回调 & 3D 对象 & 测量逻辑（完全不变）
+  //  AR 回调
   // ============================================================
 
   void _onARKitViewCreated(ARKitController controller) {
     arkitController = controller;
     arkitController.onARTap = (ar) {
-      final point = ar.firstWhereOrNull((o) => o.type == ARKitHitTestResultType.featurePoint);
+      final point = ar.firstWhereOrNull(
+        (o) => o.type == ARKitHitTestResultType.featurePoint,
+      );
       if (point != null) _onTapPoint(point);
     };
+
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) _startDetection();
     });
@@ -270,6 +350,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       hitResult.worldTransform.getColumn(3).y,
       hitResult.worldTransform.getColumn(3).z,
     );
+
     setState(() {
       _addDot(position);
       if (_lastPosition != null) _addLine(_lastPosition!, position);
@@ -279,8 +360,15 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     });
   }
 
+  // ============================================================
+  //  3D 对象
+  // ============================================================
+
   void _addDot(vector.Vector3 pos) {
-    final material = ARKitMaterial(lightingModelName: ARKitLightingModel.constant, diffuse: ARKitMaterialProperty.color(Colors.yellow));
+    final material = ARKitMaterial(
+      lightingModelName: ARKitLightingModel.constant,
+      diffuse: ARKitMaterialProperty.color(Colors.yellow),
+    );
     final sphere = ARKitSphere(radius: 0.008, materials: [material]);
     final node = ARKitNode(geometry: sphere, position: pos);
     arkitController.add(node);
@@ -293,6 +381,10 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     arkitController.add(node);
     _nodes.add(node);
   }
+
+  // ============================================================
+  //  测量逻辑
+  // ============================================================
 
   void _updateReadout() {
     if (_pts.length < 2) {
@@ -310,7 +402,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     setState(() {
       _addLine(_pts.last, _pts.first);
       double perimeter = 0;
-      for (int i = 1; i < _pts.length; i++) perimeter += _pts[i].distanceTo(_pts[i - 1]);
+      for (int i = 1; i < _pts.length; i++) {
+        perimeter += _pts[i].distanceTo(_pts[i - 1]);
+      }
       perimeter += _pts.last.distanceTo(_pts.first);
       final area = _shoelaceXZ(_pts);
       _result = '📏 周长：${_fmtLen(perimeter)}\n📐 面积：${_fmtArea(area)}';
@@ -329,6 +423,10 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     });
   }
 
+  // ============================================================
+  //  工具
+  // ============================================================
+
   double _shoelaceXZ(List<vector.Vector3> pts) {
     if (pts.length < 3) return 0;
     double s = 0;
@@ -340,54 +438,82 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     return (s / 2).abs();
   }
 
-  String _fmtLen(double m) => m < 1 ? '${(m * 100).toStringAsFixed(1)} cm' : '${m.toStringAsFixed(2)} m';
-  String _fmtArea(double sq) => sq < 1 ? '${(sq * 10000).toStringAsFixed(1)} cm²' : '${sq.toStringAsFixed(2)} m²';
-}
-
-// ============================================================
-//  ✅ 新增：跟踪目标类
-// ============================================================
-
-class TrackedObject {
-  final String id;
-  Detection det;
-  int hitCount;
-  int missCount;
-  double sx, sy, sw, sh;
-
-  TrackedObject(this.id, this.det)
-      : hitCount = 1,
-        missCount = 0,
-        sx = det.x,
-        sy = det.y,
-        sw = det.w,
-        sh = det.h;
-
-  void update(Detection newDet, double alpha) {
-    sx = alpha * newDet.x + (1 - alpha) * sx;
-    sy = alpha * newDet.y + (1 - alpha) * sy;
-    sw = alpha * newDet.w + (1 - alpha) * sw;
-    sh = alpha * newDet.h + (1 - alpha) * sh;
-    det = newDet;
-    hitCount++;
-    missCount = 0;
+  String _fmtLen(double m) {
+    if (m < 1) return '${(m * 100).toStringAsFixed(1)} cm';
+    return '${m.toStringAsFixed(2)} m';
   }
 
-  void markMissed() => missCount++;
-
-  bool get isVisible => hitCount >= 2 && missCount <= 8;
-  bool get isDead => missCount > 10;
+  String _fmtArea(double sq) {
+    if (sq < 1) return '${(sq * 10000).toStringAsFixed(1)} cm²';
+    return '${sq.toStringAsFixed(2)} m²';
+  }
 }
 
 // ============================================================
-//  数据模型 & 绘制器（Detection 不变，Painter 增加最小尺寸过滤）
+//  检测数据模型
 // ============================================================
 
 class Detection {
   final double x, y, w, h, confidence;
   final String label;
-  const Detection({required this.x, required this.y, required this.w, required this.h, required this.confidence, required this.label});
+  const Detection({
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+    required this.confidence,
+    required this.label,
+  });
 }
+
+// ============================================================
+//  稳妥去抖跟踪器
+// ============================================================
+
+class StableTrack {
+  final String id;
+  Detection smoothed;
+  int hits = 0;
+  int misses = 0;
+  bool matched = false;
+
+  StableTrack(this.id, Detection initial) : smoothed = initial;
+
+  /// 置信度加权融合：高conf帧权重更大，低conf帧仅微调
+  void update(Detection det) {
+    matched = true;
+    misses = 0;
+    hits++;
+
+    // 置信度归一化到 [confMin, 1.0] → 权重 [0.1, 0.7]
+    const confMin = _ARMeasurePageState._confWeightMin;
+    final w = ((det.confidence - confMin) / (1.0 - confMin)).clamp(0.1, 0.7);
+
+    smoothed = Detection(
+      x: w * det.x + (1 - w) * smoothed.x,
+      y: w * det.y + (1 - w) * smoothed.y,
+      w: w * det.w + (1 - w) * smoothed.w,
+      h: w * det.h + (1 - w) * smoothed.h,
+      confidence: det.confidence,
+      label: det.label,
+    );
+  }
+
+  void miss() {
+    matched = false;
+    misses++;
+  }
+
+  bool get isConfirmed =>
+      hits >= _ARMeasurePageState._confirmHits &&
+      misses <= _ARMeasurePageState._maxMisses;
+
+  bool get isDead => misses > _ARMeasurePageState._maxMisses;
+}
+
+// ============================================================
+//  检测框绘制
+// ============================================================
 
 class DetectionPainter extends CustomPainter {
   final List<Detection> detections;
@@ -395,21 +521,42 @@ class DetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final boxPaint = Paint()..color = Colors.red..style = PaintingStyle.stroke..strokeWidth = 3;
-    final fillPaint = Paint()..color = Colors.red.withOpacity(0.15)..style = PaintingStyle.fill;
+    if (size.width <= 0 || size.height <= 0) return;
+
+    final boxPaint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    final fillPaint = Paint()
+      ..color = Colors.red.withOpacity(0.15)
+      ..style = PaintingStyle.fill;
 
     for (final d in detections) {
-      final rect = Rect.fromLTWH(d.x * size.width, d.y * size.height, d.w * size.width, d.h * size.height);
-      if (rect.width < 20 || rect.height < 20) continue; // ✅ 过滤极小框
+      final rect = Rect.fromLTWH(
+        d.x * size.width,
+        d.y * size.height,
+        d.w * size.width,
+        d.h * size.height,
+      );
 
       canvas.drawRect(rect, fillPaint);
       canvas.drawRect(rect, boxPaint);
 
       final label = '🐌 ${(d.confidence * 100).toStringAsFixed(0)}%';
       final tp = TextPainter(
-        text: TextSpan(text: label, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold, backgroundColor: Colors.red)),
+        text: TextSpan(
+          text: label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            backgroundColor: Colors.red,
+          ),
+        ),
         textDirection: TextDirection.ltr,
       )..layout();
+
       tp.paint(canvas, Offset(rect.left, rect.top - tp.height - 2));
     }
   }
