@@ -533,6 +533,9 @@ class DetectionPainter extends CustomPainter {
       ..style = PaintingStyle.fill;
 
     for (final d in detections) {
+      // ✅ Native 传来的坐标已经是 centerCrop 下的归一化坐标
+      // ARKit 预览层也是 centerCrop 填充整个 view
+      // 所以直接乘 size 即可，无需任何额外补偿
       final rect = Rect.fromLTWH(
         d.x * size.width,
         d.y * size.height,
@@ -557,7 +560,10 @@ class DetectionPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
 
-      tp.paint(canvas, Offset(rect.left, rect.top - tp.height - 2));
+      // 防止标签画出屏幕外
+      final labelY = rect.top - tp.height - 2;
+      final clampedLabelY = labelY < 0 ? rect.bottom + 2 : labelY;
+      tp.paint(canvas, Offset(rect.left, clampedLabelY));
     }
   }
 

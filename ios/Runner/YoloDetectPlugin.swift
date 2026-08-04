@@ -108,41 +108,19 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         displayLink = nil
     }
 
+// YoloDetectPlugin.swift - tick() 方法替换为以下版本
+
     @objc private func tick() {
         guard isRunning,
-              let sink = eventSink,
-              let model = visionModel,
-              let frame = arSession?.currentFrame else { return }
+            let sink = eventSink,
+            let model = visionModel,
+            let frame = arSession?.currentFrame else { return }
 
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
         lastTime = now
 
         let pixelBuffer = frame.capturedImage
-
-        // ✅ 计算 .scaleFit 下的 letterbox 补偿参数
-        // 相机buffer横屏1920x1080，orientation=.right → 有效图像1080x1920(竖)
-        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
-        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
-        let imgW = bufH  // 1080 (旋转后有效宽)
-        let imgH = bufW  // 1920 (旋转后有效高)
-
-        // scaleFit: 等比缩放到屏幕内，多余部分留黑边
-        let scrW = UIScreen.main.bounds.width
-        let scrH = UIScreen.main.bounds.height
-        let scaleX = scrW / imgW
-        let scaleY = scrH / imgH
-        let fitScale = min(scaleX, scaleY)
-
-        // 缩放后图像在屏幕中的实际尺寸
-        let fittedW = imgW * fitScale
-        let fittedH = imgH * fitScale
-
-        // letterbox 偏移（归一化到 [0,1]）
-        let offsetX = (scrW - fittedW) / 2.0 / scrW   // 水平黑边占比
-        let offsetY = (scrH - fittedH) / 2.0 / scrH   // 垂直黑边占比
-        let normW = fittedW / scrW                      // 有效区域宽度占比
-        let normH = fittedH / scrH                      // 有效区域高度占比
 
         let request = VNCoreMLRequest(model: model) { req, _ in
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
@@ -153,25 +131,20 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
                 let b = o.boundingBox
 
-                // Vision .scaleFit 返回的坐标是"有效图像区域"内的归一化坐标
-                // 需要映射到全屏归一化坐标：screen = offset + vision * normSize
-                // Y轴翻转：Vision原点在左下，Flutter原点在左上
-                let xN = offsetX + b.origin.x * normW
-                let yN = offsetY + (1.0 - b.origin.y - b.height) * normH
-                let wN = b.width * normW
-                let hN = b.height * normH
-
-                // 钳制到 [0,1]
-                let cx = max(0.0, min(1.0, xN))
-                let cy = max(0.0, min(1.0, yN))
-                let cw = max(0.0, min(1.0 - cx, wN))
-                let ch = max(0.0, min(1.0 - cy, hN))
+                // Vision 返回: 原点在左下角, y 向上, 范围 [0,1]
+                // 转为: 原点在左上角, y 向下 (标准图像/Flutter 坐标系)
+                // 注意: 这里不做任何屏幕尺寸相关计算!
+                // 这个坐标是相对于"旋转后的相机帧"的归一化坐标
+                let xN = b.origin.x
+                let yN = 1.0 - b.origin.y - b.height
+                let wN = b.width
+                let hN = b.height
 
                 return [
-                    "x": cx,
-                    "y": cy,
-                    "w": cw,
-                    "h": ch,
+                    "x": max(0.0, min(1.0, xN)),
+                    "y": max(0.0, min(1.0, yN)),
+                    "w": max(0.0, min(1.0 - xN, wN)),
+                    "h": max(0.0, min(1.0 - yN, hN)),
                     "conf": top.confidence,
                     "label": top.identifier
                 ]
@@ -179,9 +152,11 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             DispatchQueue.main.async { sink(boxes) }
         }
 
-        // ✅ .scaleFit：等比缩放，Vision内部处理letterbox
-        // 我们上面手动补偿了letterbox偏移，使坐标对齐Flutter Canvas
-        request.imageCropAndScaleOption = .scaleFit
+        // ✅ 关键: 使用 .centerCrop 而不是 .scaleFit
+        // centerCrop 会让 Vision 内部裁剪到模型输入尺寸,
+        // 返回的 boundingBox 直接对应裁剪后的图像区域
+        // 这样坐标就是稳定的"相机纹理中心裁剪"坐标
+        request.imageCropAndScaleOption = .centerCrop
 
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
