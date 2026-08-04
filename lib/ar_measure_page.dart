@@ -107,7 +107,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.4).toList();
+      }).where((d) => d.confidence > 0.3).toList();
 
       // 标记所有轨迹未匹配
       for (final t in _tracks.values) t.matched = false;
