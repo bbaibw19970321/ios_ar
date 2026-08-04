@@ -108,13 +108,11 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         displayLink = nil
     }
 
-// YoloDetectPlugin.swift - tick() 方法替换为以下版本
-
     @objc private func tick() {
         guard isRunning,
-            let sink = eventSink,
-            let model = visionModel,
-            let frame = arSession?.currentFrame else { return }
+              let sink = eventSink,
+              let model = visionModel,
+              let frame = arSession?.currentFrame else { return }
 
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
@@ -122,29 +120,53 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
+        // 相机 buffer 横屏 1920x1080，orientation .right → 有效竖图 1080x1920
+        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
+        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
+        let imgW = bufH   // 1080（有效宽）
+        let imgH = bufW   // 1920（有效高）
+
+        // aspect-fill 映射：相机图归一化 → 屏幕归一化
+        let rImg = min(imgW, imgH) / max(imgW, imgH)   // 0.5625
+        let scr = UIScreen.main.bounds.size
+        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
+        let kx: CGFloat
+        let ky: CGFloat
+        if rScr < rImg {
+            kx = rImg / rScr
+            ky = 1.0
+        } else {
+            kx = 1.0
+            ky = rScr / rImg
+        }
+
         let request = VNCoreMLRequest(model: model) { req, _ in
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
                 DispatchQueue.main.async { sink([]) }
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.5 else { return nil }
                 let b = o.boundingBox
 
-                // Vision 返回: 原点在左下角, y 向上, 范围 [0,1]
-                // 转为: 原点在左上角, y 向下 (标准图像/Flutter 坐标系)
-                // 注意: 这里不做任何屏幕尺寸相关计算!
-                // 这个坐标是相对于"旋转后的相机帧"的归一化坐标
-                let xN = b.origin.x
-                let yN = 1.0 - b.origin.y - b.height
-                let wN = b.width
-                let hN = b.height
+                // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
+                // 只需：左下原点 → 左上原点
+                let u = b.origin.x
+                let v = 1.0 - b.origin.y - b.height
+                let w = b.width
+                let h = b.height
+
+                // aspect-fill → 屏幕归一化
+                let xN = 0.5 + (u - 0.5) * kx
+                let yN = 0.5 + (v - 0.5) * ky
+                let wN = w * kx
+                let hN = h * ky
 
                 return [
-                    "x": max(0.0, min(1.0, xN)),
-                    "y": max(0.0, min(1.0, yN)),
-                    "w": max(0.0, min(1.0 - xN, wN)),
-                    "h": max(0.0, min(1.0 - yN, hN)),
+                    "x": xN,
+                    "y": yN,
+                    "w": wN,
+                    "h": hN,
                     "conf": top.confidence,
                     "label": top.identifier
                 ]
@@ -152,11 +174,8 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             DispatchQueue.main.async { sink(boxes) }
         }
 
-        // ✅ 关键: 使用 .centerCrop 而不是 .scaleFit
-        // centerCrop 会让 Vision 内部裁剪到模型输入尺寸,
-        // 返回的 boundingBox 直接对应裁剪后的图像区域
-        // 这样坐标就是稳定的"相机纹理中心裁剪"坐标
-        request.imageCropAndScaleOption = .centerCrop
+        // ✅ .scaleFit：等比缩放+黑边，Vision 内部处理 letterbox 并自动反算坐标
+        request.imageCropAndScaleOption = .scaleFit
 
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,

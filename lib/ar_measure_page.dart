@@ -27,15 +27,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
-  // ✅ 稳妥去抖跟踪器
-  final Map<String, StableTrack> _tracks = {};
-  int _nextTrackId = 0;
-
-  // 去抖参数
-  static const int _confirmHits = 2;       // 连续命中N帧才显示
-  static const int _maxMisses = 8;         // 连续丢失N帧才销毁
-  static const double _iouThreshold = 0.15; // IoU匹配阈值
-  static const double _confWeightMin = 0.5; // 最低参与融合的置信度
+  // ✅ IoU 跟踪去抖（替代旧的网格key方案）
+  final Map<String, _Track> _tracks = {};
+  int _nextId = 0;
+  static const int _confirmHits = 3;
+  static const int _maxMisses = 6;
+  static const double _iouThresh = 0.2;
 
   @override
   void dispose() {
@@ -54,7 +51,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       await _methodChannel.invokeMethod('start');
       _detectSub = _eventChannel.receiveBroadcastStream().listen(
         _onDetections,
-        onError: (e) => debugPrint('❌ 事件流错误: $e'),
+        onError: (e) {
+          debugPrint('❌ 事件流错误: $e');
+        },
       );
       setState(() {
         _detecting = true;
@@ -70,7 +69,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       }
     } catch (e) {
       debugPrint('❌ 启动失败: $e');
-      if (mounted) setState(() => _info = '❌ 启动失败: $e');
+      if (mounted) {
+        setState(() => _info = '❌ 启动失败: $e');
+      }
     }
   }
 
@@ -86,18 +87,17 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _detections = [];
         _snailCount = 0;
         _tracks.clear();
-        _nextTrackId = 0;
+        _nextId = 0;
         _info = '检测已停止';
       });
     }
   }
 
-  // ✅ 稳妥去抖：IoU贪心匹配 + 置信度加权融合 + 状态机确认
+  // ✅ IoU 贪心跟踪去抖（坐标零修改）
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
     try {
-      // 1. 解析原始检测
-      final raw = (data as List).map((e) {
+      final current = (data as List).map((e) {
         final m = Map<String, dynamic>.from(e);
         return Detection(
           x: (m['x'] as num).toDouble(),
@@ -107,71 +107,64 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence >= _confWeightMin).toList();
+      }).where((d) => d.confidence > 0.5).toList();
 
-      // 2. 所有已有轨迹标记为未匹配
+      // 标记所有轨迹未匹配
       for (final t in _tracks.values) t.matched = false;
 
-      // 3. 贪心 IoU 匹配
-      final matchedTrackIds = <String>{};
-      for (final det in raw) {
+      // 贪心 IoU 匹配
+      final usedTracks = <String>{};
+      for (final det in current) {
         String? bestId;
-        double bestIou = _iouThreshold;
-
+        double bestIou = _iouThresh;
         for (final entry in _tracks.entries) {
-          if (matchedTrackIds.contains(entry.key)) continue;
-          final iou = _computeIoU(det, entry.value.smoothed);
+          if (usedTracks.contains(entry.key)) continue;
+          final iou = _computeIoU(det, entry.value.box);
           if (iou > bestIou) {
             bestIou = iou;
             bestId = entry.key;
           }
         }
-
         if (bestId != null) {
           _tracks[bestId]!.update(det);
-          matchedTrackIds.add(bestId);
+          usedTracks.add(bestId);
         } else {
-          final id = 't_${_nextTrackId++}';
-          _tracks[id] = StableTrack(id, det);
+          _tracks['t${_nextId++}'] = _Track(det);
         }
       }
 
-      // 4. 未匹配的轨迹计入 miss
+      // 未匹配轨迹计 miss
       for (final t in _tracks.values) {
         if (!t.matched) t.miss();
       }
 
-      // 5. 清理死亡轨迹
-      _tracks.removeWhere((_, t) => t.isDead);
+      // 清除死亡轨迹
+      _tracks.removeWhere((_, t) => t.dead);
 
-      // 6. 提取已确认的可见目标
-      final visible = _tracks.values
-          .where((t) => t.isConfirmed)
-          .map((t) => t.smoothed)
+      // 提取已确认目标
+      final stable = _tracks.values
+          .where((t) => t.confirmed)
+          .map((t) => t.box)
           .toList();
 
       setState(() {
-        _detections = visible;
-        _snailCount = visible.length;
+        _detections = stable;
+        _snailCount = stable.length;
       });
     } catch (e) {
-      debugPrint('⚠️ 跟踪处理异常: $e');
+      debugPrint('⚠️ 跟踪异常: $e');
     }
   }
 
   double _computeIoU(Detection a, Detection b) {
     final ax2 = a.x + a.w, ay2 = a.y + a.h;
     final bx2 = b.x + b.w, by2 = b.y + b.h;
-
     final ix1 = a.x > b.x ? a.x : b.x;
     final iy1 = a.y > b.y ? a.y : b.y;
     final ix2 = ax2 < bx2 ? ax2 : bx2;
     final iy2 = ay2 < by2 ? ay2 : by2;
-
-    final iw = ix2 - ix1;
-    final ih = iy2 - iy1;
+    final iw = ix2 - ix1, ih = iy2 - iy1;
     if (iw <= 0 || ih <= 0) return 0.0;
-
     final inter = iw * ih;
     final union = a.w * a.h + b.w * b.h - inter;
     return union > 0 ? inter / union : 0.0;
@@ -336,7 +329,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       final point = ar.firstWhereOrNull(
         (o) => o.type == ARKitHitTestResultType.featurePoint,
       );
-      if (point != null) _onTapPoint(point);
+      if (point != null) {
+        _onTapPoint(point);
+      }
     };
 
     Future.delayed(const Duration(seconds: 2), () {
@@ -353,7 +348,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
     setState(() {
       _addDot(position);
-      if (_lastPosition != null) _addLine(_lastPosition!, position);
+      if (_lastPosition != null) {
+        _addLine(_lastPosition!, position);
+      }
       _pts.add(position);
       _lastPosition = position;
       _updateReadout();
@@ -414,7 +411,9 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
 
   void _clear() {
     setState(() {
-      for (final node in _nodes) arkitController.remove(node.name);
+      for (final node in _nodes) {
+        arkitController.remove(node.name);
+      }
       _nodes.clear();
       _pts.clear();
       _lastPosition = null;
@@ -467,36 +466,22 @@ class Detection {
 }
 
 // ============================================================
-//  稳妥去抖跟踪器
+//  IoU 跟踪器（去抖核心）
 // ============================================================
 
-class StableTrack {
-  final String id;
-  Detection smoothed;
+class _Track {
+  Detection box;
   int hits = 0;
   int misses = 0;
   bool matched = false;
 
-  StableTrack(this.id, Detection initial) : smoothed = initial;
+  _Track(this.box);
 
-  /// 置信度加权融合：高conf帧权重更大，低conf帧仅微调
   void update(Detection det) {
     matched = true;
     misses = 0;
     hits++;
-
-    // 置信度归一化到 [confMin, 1.0] → 权重 [0.1, 0.7]
-    const confMin = _ARMeasurePageState._confWeightMin;
-    final w = ((det.confidence - confMin) / (1.0 - confMin)).clamp(0.1, 0.7);
-
-    smoothed = Detection(
-      x: w * det.x + (1 - w) * smoothed.x,
-      y: w * det.y + (1 - w) * smoothed.y,
-      w: w * det.w + (1 - w) * smoothed.w,
-      h: w * det.h + (1 - w) * smoothed.h,
-      confidence: det.confidence,
-      label: det.label,
-    );
+    box = det; // ✅ 直接用原始坐标，零修改
   }
 
   void miss() {
@@ -504,11 +489,11 @@ class StableTrack {
     misses++;
   }
 
-  bool get isConfirmed =>
+  bool get confirmed =>
       hits >= _ARMeasurePageState._confirmHits &&
       misses <= _ARMeasurePageState._maxMisses;
 
-  bool get isDead => misses > _ARMeasurePageState._maxMisses;
+  bool get dead => misses > _ARMeasurePageState._maxMisses;
 }
 
 // ============================================================
@@ -521,8 +506,6 @@ class DetectionPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.width <= 0 || size.height <= 0) return;
-
     final boxPaint = Paint()
       ..color = Colors.red
       ..style = PaintingStyle.stroke
@@ -533,9 +516,6 @@ class DetectionPainter extends CustomPainter {
       ..style = PaintingStyle.fill;
 
     for (final d in detections) {
-      // ✅ Native 传来的坐标已经是 centerCrop 下的归一化坐标
-      // ARKit 预览层也是 centerCrop 填充整个 view
-      // 所以直接乘 size 即可，无需任何额外补偿
       final rect = Rect.fromLTWH(
         d.x * size.width,
         d.y * size.height,
@@ -560,10 +540,7 @@ class DetectionPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
 
-      // 防止标签画出屏幕外
-      final labelY = rect.top - tp.height - 2;
-      final clampedLabelY = labelY < 0 ? rect.bottom + 2 : labelY;
-      tp.paint(canvas, Offset(rect.left, clampedLabelY));
+      tp.paint(canvas, Offset(rect.left, rect.top - tp.height - 2));
     }
   }
 
