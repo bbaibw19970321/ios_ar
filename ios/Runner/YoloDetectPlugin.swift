@@ -3,6 +3,7 @@ import UIKit
 import ARKit
 import Vision
 import CoreML
+import Accelerate
 
 public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
@@ -12,8 +13,13 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var arSession: ARSession?
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
-    private let interval: CFTimeInterval = 0.033 
+    private let interval: CFTimeInterval = 0.033
     private var retryCount = 0
+    private var exposureLocked = false
+
+    // ✅ 多帧融合缓冲
+    private var recentBoxes: [[[String: Any]]] = []
+    private let fusionFrames = 3
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
@@ -106,10 +112,21 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         isRunning = false
         displayLink?.invalidate()
         displayLink = nil
-    }
+        recentBoxes.removeAll()
 
-    private var recentBoxes: [[[String: Any]]] = []
-    private let fusionFrames = 3  // 融合最近3帧
+        // ✅ 恢复自动曝光
+        if exposureLocked {
+            if let device = AVCaptureDevice.default(for: .video) {
+                do {
+                    try device.lockForConfiguration()
+                    device.activeMaxExposureDuration = device.activeFormat.maxExposureDuration
+                    device.exposureMode = .continuousAutoExposure
+                    device.unlockForConfiguration()
+                    exposureLocked = false
+                } catch {}
+            }
+        }
+    }
 
     @objc private func tick() {
         guard isRunning,
@@ -117,7 +134,18 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
               let model = visionModel,
               let frame = arSession?.currentFrame else { return }
 
-        // ... 曝光锁定代码保持不变 ...
+        // ✅ 仅首次锁定曝光
+        if !exposureLocked {
+            if let device = AVCaptureDevice.default(for: .video) {
+                do {
+                    try device.lockForConfiguration()
+                    device.activeMaxExposureDuration = CMTime(value: 1, timescale: 120)
+                    device.exposureMode = .continuousAutoExposure
+                    device.unlockForConfiguration()
+                    exposureLocked = true
+                } catch {}
+            }
+        }
 
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
@@ -125,7 +153,28 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
-        // ... bufW/bufH/kx/ky 计算完全不变 ...
+        // ✅ 将 kx/ky 提取到闭包外部可访问的位置
+        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let imgW = bufH
+        let imgH = bufW
+
+        let rImg = min(imgW, imgH) / max(imgW, imgH)
+        let scr = UIScreen.main.bounds.size
+        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
+        let kx: CGFloat
+        let ky: CGFloat
+        if rScr < rImg {
+            kx = rImg / rScr
+            ky = 1.0
+        } else {
+            kx = 1.0
+            ky = rScr / rImg
+        }
+
+        // ✅ 用局部变量捕获 kx/ky，避免闭包作用域问题
+        let capturedKx = kx
+        let capturedKy = ky
 
         let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
             guard let self = self else { return }
@@ -134,47 +183,53 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
 
-            // ✅ 原始单帧结果（坐标映射完全不变）
+            // ✅ 坐标映射完全不变，只是把 kx/ky 换成 capturedKx/capturedKy
             let currentBoxes: [[String: Any]] = obs.compactMap { o in
                 guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
                 let b = o.boundingBox
+
                 let u = b.origin.x
                 let v = 1.0 - b.origin.y - b.height
                 let w = b.width
                 let h = b.height
-                let xN = 0.5 + (u - 0.5) * kx
-                let yN = 0.5 + (v - 0.5) * ky
-                let wN = w * kx
-                let hN = h * ky
+
+                let xN = 0.5 + (u - 0.5) * capturedKx
+                let yN = 0.5 + (v - 0.5) * capturedKy
+                let wN = w * capturedKx
+                let hN = h * capturedKy
+
                 return [
-                    "x": xN, "y": yN, "w": wN, "h": hN,
+                    "x": xN,
+                    "y": yN,
+                    "w": wN,
+                    "h": hN,
                     "conf": top.confidence,
                     "label": top.identifier
                 ]
             }
 
-            // ✅ 多帧融合：保留最近N帧，取置信度加权平均
+            // ✅ 多帧融合
             self.recentBoxes.append(currentBoxes)
             if self.recentBoxes.count > self.fusionFrames {
                 self.recentBoxes.removeFirst()
             }
 
             let fused = self.temporalFuse(self.recentBoxes)
-
             DispatchQueue.main.async { sink(fused) }
         }
 
         request.imageCropAndScaleOption = .scaleFit
-        request.resizeConstraint = VNImageConstraint(
-            size: CGSize(width: 1280, height: 1280)  // ← 改成你模型的实际输入尺寸
+        // ✅ 移除了无效的 VNImageConstraint，Vision 会自动使用模型原生输入尺寸
+
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: pixelBuffer,
+            orientation: .right
         )
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
         try? handler.perform([request])
     }
 
-    /// ✅ 时序融合：对最近N帧做跨帧NMS + 置信度聚合
+    /// ✅ 时序融合：跨帧NMS + 置信度加权平均
     private func temporalFuse(_ frames: [[[String: Any]]]) -> [[String: Any]] {
-        // 展平所有帧的框
         var all: [(box: [String: Any], conf: Double)] = []
         for frame in frames {
             for b in frame {
@@ -185,7 +240,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         }
         guard !all.isEmpty else { return [] }
 
-        // 按置信度降序
         all.sort { $0.conf > $1.conf }
 
         var result: [[String: Any]] = []
@@ -194,8 +248,10 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         for i in 0..<all.count {
             guard !used.contains(i) else { continue }
             let bi = all[i].box
-            let xi = bi["x"] as! Double, yi = bi["y"] as! Double
-            let wi = bi["w"] as! Double, hi = bi["h"] as! Double
+            guard let xi = bi["x"] as? Double,
+                  let yi = bi["y"] as? Double,
+                  let wi = bi["w"] as? Double,
+                  let hi = bi["h"] as? Double else { continue }
 
             var sumX = xi * all[i].conf
             var sumY = yi * all[i].conf
@@ -205,12 +261,13 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             var count = 1
             used.insert(i)
 
-            // 找同组框（IoU > 0.3）
             for j in (i+1)..<all.count {
                 guard !used.contains(j) else { continue }
                 let bj = all[j].box
-                let xj = bj["x"] as! Double, yj = bj["y"] as! Double
-                let wj = bj["w"] as! Double, hj = bj["h"] as! Double
+                guard let xj = bj["x"] as? Double,
+                      let yj = bj["y"] as? Double,
+                      let wj = bj["w"] as? Double,
+                      let hj = bj["h"] as? Double else { continue }
 
                 let ix1 = max(xi, xj), iy1 = max(yi, yj)
                 let ix2 = min(xi+wi, xj+wj), iy2 = min(yi+hi, yj+hj)
@@ -228,14 +285,13 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 }
             }
 
-            // 置信度加权平均坐标
             result.append([
                 "x": sumX / sumC,
                 "y": sumY / sumC,
                 "w": sumW / sumC,
                 "h": sumH / sumC,
                 "conf": min(1.0, sumC / Double(count) * (1.0 + 0.1 * Double(count - 1))),
-                "label": bi["label"] as! String
+                "label": bi["label"] as? String ?? "snail"
             ])
         }
         return result
