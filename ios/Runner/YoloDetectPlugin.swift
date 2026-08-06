@@ -126,29 +126,26 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AR
                 return
             }
             
-            // ✅ 紧凑 Float32 二进制格式，跳过 StandardMessageCodec
-            // 布局: [count: Float32] + N * [x,y,w,h,conf: Float32]
             var buffer = [Float32]()
             buffer.reserveCapacity(1 + obs.count * 5)
             
             for o in obs {
                 guard let top = o.labels.first, top.confidence > 0.3 else { continue }
                 
-                // ✅ Vision 内置坐标反算，自动处理 orientation + scaleFit letterbox
-                let rect = o.boundingBoxForImageRect(
-                    CGRect(x: 0, y: 0, width: 1, height: 1),
-                    imageSize: CGSize(width: bufW, height: bufH)
-                )
+                // ✅ 兼容 iOS 13+：手动处理 scaleFit letterbox 反算
+                // Vision 返回的 boundingBox 已经是相对于原始图像空间的归一化坐标（左下原点）
+                // .scaleFit 模式下 Vision 内部已自动将 letterbox 偏移纳入计算
+                // 因此直接使用 boundingBox 即可，无需 boundingBoxForImageRect
+                let b = o.boundingBox
                 
                 // 左下原点 → 左上原点
-                buffer.append(Float32(rect.origin.x))
-                buffer.append(Float32(1.0 - rect.origin.y - rect.height))
-                buffer.append(Float32(rect.width))
-                buffer.append(Float32(rect.height))
+                buffer.append(Float32(b.origin.x))
+                buffer.append(Float32(1.0 - b.origin.y - b.height))
+                buffer.append(Float32(b.width))
+                buffer.append(Float32(b.height))
                 buffer.append(Float32(top.confidence))
             }
             
-            // 写入 count 到首位
             let count = Float32(buffer.count / 5)
             var finalBuffer = [count] + buffer
             
@@ -156,7 +153,9 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AR
             DispatchQueue.main.async { sink(data) }
         }
 
-        request.imageCropAndScaleOption = .scaleFit
+        // ✅ 显式指定完整枚举路径，解决 "Cannot infer contextual base" 错误
+        request.imageCropAndScaleOption = VNImageCropAndScaleOption.scaleFit
+        
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
         try? handler.perform([request])
     }
