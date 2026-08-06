@@ -4,49 +4,39 @@ import ARKit
 import Vision
 import CoreML
 
-public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, ARSessionDelegate {
 
     private var eventSink: FlutterEventSink?
-    private var displayLink: CADisplayLink?
     private var visionModel: VNCoreMLModel?
     private var arSession: ARSession?
     private var isRunning = false
+    
+    // ✅ 专用推理队列，避免阻塞主线程
+    private let inferenceQueue = DispatchQueue(label: "yolo.inference", qos: .userInteractive)
     private var lastTime: CFTimeInterval = 0
-    private let interval: CFTimeInterval = 0.033 
+    private let interval: CFTimeInterval = 0.033 // ~30 FPS
     private var retryCount = 0
+    
+    // ✅ 线程安全的时间戳保护
+    private let timeLock = NSLock()
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
-
-        let method = FlutterMethodChannel(
-            name: "yolo_detect",
-            binaryMessenger: registrar.messenger()
-        )
+        let method = FlutterMethodChannel(name: "yolo_detect", binaryMessenger: registrar.messenger())
         registrar.addMethodCallDelegate(instance, channel: method)
-
-        let event = FlutterEventChannel(
-            name: "yolo_detect/events",
-            binaryMessenger: registrar.messenger()
-        )
+        let event = FlutterEventChannel(name: "yolo_detect/events", binaryMessenger: registrar.messenger())
         event.setStreamHandler(instance)
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
-        case "start":
-            startDetection(result: result)
-        case "stop":
-            stopDetection()
-            result(nil)
-        default:
-            result(FlutterMethodNotImplemented)
+        case "start": startDetection(result: result)
+        case "stop": stopDetection(); result(nil)
+        default: result(FlutterMethodNotImplemented)
         }
     }
 
-    public func onListen(
-        withArguments arguments: Any?,
-        eventSink events: @escaping FlutterEventSink
-    ) -> FlutterError? {
+    public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         eventSink = events
         return nil
     }
@@ -61,18 +51,14 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         if visionModel == nil {
             guard let url = Bundle.main.url(forResource: "best", withExtension: "mlmodelc") else {
-                result(FlutterError(code: "MODEL_NOT_FOUND",
-                                    message: "best.mlmodelc not in bundle",
-                                    details: nil))
+                result(FlutterError(code: "MODEL_NOT_FOUND", message: "best.mlmodelc not in bundle", details: nil))
                 return
             }
             do {
                 let mlModel = try MLModel(contentsOf: url)
                 visionModel = try VNCoreMLModel(for: mlModel)
             } catch {
-                result(FlutterError(code: "MODEL_LOAD_ERROR",
-                                    message: error.localizedDescription,
-                                    details: nil))
+                result(FlutterError(code: "MODEL_LOAD_ERROR", message: error.localizedDescription, details: nil))
                 return
             }
         }
@@ -86,9 +72,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 }
                 return
             } else {
-                result(FlutterError(code: "NO_AR_SESSION",
-                                    message: "Cannot find ARSession",
-                                    details: nil))
+                result(FlutterError(code: "NO_AR_SESSION", message: "Cannot find ARSession", details: nil))
                 retryCount = 0
                 return
             }
@@ -96,91 +80,84 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         retryCount = 0
         isRunning = true
-        displayLink = CADisplayLink(target: self, selector: #selector(tick))
-        displayLink?.preferredFramesPerSecond = 10
-        displayLink?.add(to: .main, forMode: .common)
+        lastTime = 0
+        
+        // ✅ 注册为 ARSession delegate，与相机帧严格同步
+        arSession?.delegate = self
+        
         result(nil)
     }
 
     private func stopDetection() {
         isRunning = false
-        displayLink?.invalidate()
-        displayLink = nil
+        arSession?.delegate = nil
     }
 
-    @objc private func tick() {
-        guard isRunning,
-              let sink = eventSink,
-              let model = visionModel,
-              let frame = arSession?.currentFrame else { return }
-
+    // ✅ ARSessionDelegate：每帧回调，消除 CADisplayLink 相位差
+    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard isRunning else { return }
+        
+        timeLock.lock()
         let now = CACurrentMediaTime()
-        guard now - lastTime >= interval else { return }
-        lastTime = now
-
-        let pixelBuffer = frame.capturedImage
-
-        // 相机 buffer 横屏 1920x1080，orientation .right → 有效竖图 1080x1920
-        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
-        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
-        let imgW = bufH   // 1080（有效宽）
-        let imgH = bufW   // 1920（有效高）
-
-        // aspect-fill 映射：相机图归一化 → 屏幕归一化
-        let rImg = min(imgW, imgH) / max(imgW, imgH)   // 0.5625
-        let scr = UIScreen.main.bounds.size
-        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
-        let kx: CGFloat
-        let ky: CGFloat
-        if rScr < rImg {
-            kx = rImg / rScr
-            ky = 1.0
-        } else {
-            kx = 1.0
-            ky = rScr / rImg
+        let elapsed = now - lastTime
+        if elapsed < interval {
+            timeLock.unlock()
+            return
         }
+        lastTime = now
+        timeLock.unlock()
+        
+        // ✅ 扔到专用队列，不阻塞主线程/AR渲染
+        inferenceQueue.async { [weak self] in
+            self?.processFrame(frame)
+        }
+    }
+
+    private func processFrame(_ frame: ARFrame) {
+        guard let sink = eventSink, let model = visionModel else { return }
+        
+        let pixelBuffer = frame.capturedImage
+        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
 
         let request = VNCoreMLRequest(model: model) { req, _ in
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
-                DispatchQueue.main.async { sink([]) }
+                DispatchQueue.main.async { sink(Data()) }
                 return
             }
-            let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
-                let b = o.boundingBox
-
-                // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
-                // 只需：左下原点 → 左上原点
-                let u = b.origin.x
-                let v = 1.0 - b.origin.y - b.height
-                let w = b.width
-                let h = b.height
-
-                // aspect-fill → 屏幕归一化
-                let xN = 0.5 + (u - 0.5) * kx
-                let yN = 0.5 + (v - 0.5) * ky
-                let wN = w * kx
-                let hN = h * ky
-
-                return [
-                    "x": xN,
-                    "y": yN,
-                    "w": wN,
-                    "h": hN,
-                    "conf": top.confidence,
-                    "label": top.identifier
-                ]
+            
+            // ✅ 紧凑 Float32 二进制格式，跳过 StandardMessageCodec
+            // 布局: [count: Float32] + N * [x,y,w,h,conf: Float32]
+            var buffer = [Float32]()
+            buffer.reserveCapacity(1 + obs.count * 5)
+            
+            for o in obs {
+                guard let top = o.labels.first, top.confidence > 0.3 else { continue }
+                
+                // ✅ Vision 内置坐标反算，自动处理 orientation + scaleFit letterbox
+                let rect = o.boundingBoxForImageRect(
+                    CGRect(x: 0, y: 0, width: 1, height: 1),
+                    imageSize: CGSize(width: bufW, height: bufH)
+                )
+                
+                // 左下原点 → 左上原点
+                buffer.append(Float32(rect.origin.x))
+                buffer.append(Float32(1.0 - rect.origin.y - rect.height))
+                buffer.append(Float32(rect.width))
+                buffer.append(Float32(rect.height))
+                buffer.append(Float32(top.confidence))
             }
-            DispatchQueue.main.async { sink(boxes) }
+            
+            // 写入 count 到首位
+            let count = Float32(buffer.count / 5)
+            var finalBuffer = [count] + buffer
+            
+            let data = Data(bytes: &finalBuffer, count: finalBuffer.count * MemoryLayout<Float32>.size)
+            DispatchQueue.main.async { sink(data) }
         }
 
-        // ✅ .scaleFit：等比缩放+黑边，Vision 内部处理 letterbox 并自动反算坐标
         request.imageCropAndScaleOption = .scaleFit
-
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: pixelBuffer,
-            orientation: .right
-        )
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
         try? handler.perform([request])
     }
 
