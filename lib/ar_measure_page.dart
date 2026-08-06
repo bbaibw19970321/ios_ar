@@ -30,7 +30,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   // ✅ 连续 帧确认
   List<Detection> _prevDetections = [];
   final Map<String, int> _hitCount = {};
-  static const int _stableFrames = 2;
+  static const int _stableFrames = 1;
 
   @override
   void dispose() {
@@ -105,7 +105,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.3).toList();
+      }).where((d) => d.confidence > 0.1).toList();
 
       final newHitCount = <String, int>{};
       final stable = <Detection>[];
