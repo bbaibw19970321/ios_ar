@@ -17,10 +17,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var retryCount = 0
     private var exposureLocked = false
 
-    // ✅ 多帧融合缓冲
-    private var recentBoxes: [[[String: Any]]] = []
-    private let fusionFrames = 3
-
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = YoloDetectPlugin()
 
@@ -75,6 +71,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             do {
                 let mlModel = try MLModel(contentsOf: url)
                 visionModel = try VNCoreMLModel(for: mlModel)
+                print("✅ Model loaded successfully")
             } catch {
                 result(FlutterError(code: "MODEL_LOAD_ERROR",
                                     message: error.localizedDescription,
@@ -112,9 +109,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         isRunning = false
         displayLink?.invalidate()
         displayLink = nil
-        recentBoxes.removeAll()
 
-        // ✅ 恢复自动曝光
         if exposureLocked {
             if let device = AVCaptureDevice.default(for: .video) {
                 do {
@@ -139,7 +134,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             if let device = AVCaptureDevice.default(for: .video) {
                 do {
                     try device.lockForConfiguration()
-                    device.activeMaxExposureDuration = CMTime(value: 1, timescale: 120)
+                    device.activeMaxExposureDuration = CMTime(value: 1, timescale: 60)
                     device.exposureMode = .continuousAutoExposure
                     device.unlockForConfiguration()
                     exposureLocked = true
@@ -153,7 +148,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
         let pixelBuffer = frame.capturedImage
 
-        // ✅ 将 kx/ky 提取到闭包外部可访问的位置
         let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
         let imgW = bufH
@@ -172,20 +166,18 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             ky = rScr / rImg
         }
 
-        // ✅ 用局部变量捕获 kx/ky，避免闭包作用域问题
         let capturedKx = kx
         let capturedKy = ky
 
-        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
-            guard let self = self else { return }
+        let request = VNCoreMLRequest(model: model) { req, _ in
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
                 DispatchQueue.main.async { sink([]) }
                 return
             }
 
-            // ✅ 坐标映射完全不变，只是把 kx/ky 换成 capturedKx/capturedKy
+            // ✅ 单帧直出，不做多帧融合
             let currentBoxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.25 else { return nil }
                 let b = o.boundingBox
 
                 let u = b.origin.x
@@ -208,18 +200,10 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 ]
             }
 
-            // ✅ 多帧融合
-            self.recentBoxes.append(currentBoxes)
-            if self.recentBoxes.count > self.fusionFrames {
-                self.recentBoxes.removeFirst()
-            }
-
-            let fused = self.temporalFuse(self.recentBoxes)
-            DispatchQueue.main.async { sink(fused) }
+            DispatchQueue.main.async { sink(currentBoxes) }
         }
 
         request.imageCropAndScaleOption = .scaleFit
-        // ✅ 移除了无效的 VNImageConstraint，Vision 会自动使用模型原生输入尺寸
 
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
@@ -228,86 +212,6 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         try? handler.perform([request])
     }
 
-    /// ✅ 时序融合：跨帧NMS + 置信度加权平均
-        /// ✅ 修复版时序融合
-    private func temporalFuse(_ frames: [[[String: Any]]]) -> [[String: Any]] {
-        // 展平所有帧的框，附带来源帧索引
-        var all: [(box: [String: Any], conf: Double, frameIdx: Int)] = []
-        for (idx, frame) in frames.enumerated() {
-            for b in frame {
-                if let c = b["conf"] as? Double, c > 0.2 { // ✅ 降低内部阈值
-                    all.append((b, c, idx))
-                }
-            }
-        }
-        guard !all.isEmpty else { return [] }
-
-        // 按置信度降序
-        all.sort { $0.conf > $1.conf }
-
-        var result: [[String: Any]] = []
-        var used = Set<Int>()
-
-        for i in 0..<all.count {
-            guard !used.contains(i) else { continue }
-            let bi = all[i].box
-            guard let xi = bi["x"] as? Double,
-                  let yi = bi["y"] as? Double,
-                  let wi = bi["w"] as? Double,
-                  let hi = bi["h"] as? Double else { continue }
-
-            // ✅ 直接用最高置信度作为基准，不做除法衰减
-            var bestConf = all[i].conf
-            var sumX = xi * bestConf
-            var sumY = yi * bestConf
-            var sumW = wi * bestConf
-            var sumH = hi * bestConf
-            var weightSum = bestConf
-            used.insert(i)
-
-            // 合并同组框
-            for j in (i+1)..<all.count {
-                guard !used.contains(j) else { continue }
-                let bj = all[j].box
-                guard let xj = bj["x"] as? Double,
-                      let yj = bj["y"] as? Double,
-                      let wj = bj["w"] as? Double,
-                      let hj = bj["h"] as? Double else { continue }
-
-                let ix1 = max(xi, xj), iy1 = max(yi, yj)
-                let ix2 = min(xi+wi, xj+wj), iy2 = min(yi+hi, yj+hj)
-                let iw = max(0, ix2-ix1), ih = max(0, iy2-iy1)
-                let inter = iw * ih
-                let union = wi*hi + wj*hj - inter
-                let iou = union > 0 ? inter / union : 0.0
-
-                if iou > 0.25 { // ✅ IoU阈值从0.3降到0.25，模糊框变形也能合并
-                    let cj = all[j].conf
-                    sumX += xj * cj; sumY += yj * cj
-                    sumW += wj * cj; sumH += hj * cj
-                    weightSum += cj
-                    // ✅ 取最大置信度而非平均
-                    bestConf = max(bestConf, cj)
-                    used.insert(j)
-                }
-            }
-
-            // ✅ 输出置信度 = 组内最高置信度（不衰减）
-            // 多帧命中天然可信，不需要额外boost也不需要除法
-            result.append([
-                "x": sumX / weightSum,
-                "y": sumY / weightSum,
-                "w": sumW / weightSum,
-                "h": sumH / weightSum,
-                "conf": bestConf,
-                "label":"snail"
-            ])
-        }
-
-        // ✅ 只保留置信度 > 0.25 的结果（与Dart端0.3阈值留有余量）
-        return result.filter { ($0["conf"] as? Double ?? 0) > 0.25 }
-    }
-    
     private func findARSession() -> ARSession? {
         guard let window = UIApplication.shared.windows.first else { return nil }
         return searchView(window)

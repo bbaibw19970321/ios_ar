@@ -27,12 +27,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
-  // ✅ IoU 跟踪去抖（替代旧的网格key方案）
+  // ✅ IoU 跟踪去抖
   final Map<String, _Track> _tracks = {};
   int _nextId = 0;
   static const int _confirmHits = 1;
-  static const int _maxMisses = 6;
-  static const double _iouThresh = 0.2;
+  static const int _maxMisses = 10;     // ✅ 6→10，容忍移动漏检
+  static const double _iouThresh = 0.15; // ✅ 0.2→0.15，模糊框也能匹配
 
   @override
   void dispose() {
@@ -93,7 +93,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     }
   }
 
-  // ✅ IoU 贪心跟踪去抖（坐标零修改）
+  // ✅ IoU 贪心跟踪去抖
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
     try {
@@ -107,7 +107,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.2).toList();
+      }).where((d) => d.confidence > 0.15).toList(); // ✅ 0.2→0.15
 
       // 标记所有轨迹未匹配
       for (final t in _tracks.values) t.matched = false;
@@ -119,7 +119,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         double bestIou = _iouThresh;
         for (final entry in _tracks.entries) {
           if (usedTracks.contains(entry.key)) continue;
-          final iou = _computeIoU(det, entry.value.box);
+          final iou = _computeIoU(det, entry.value.smoothBox); // ✅ 用smoothBox匹配
           if (iou > bestIou) {
             bestIou = iou;
             bestId = entry.key;
@@ -141,10 +141,10 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
       // 清除死亡轨迹
       _tracks.removeWhere((_, t) => t.dead);
 
-      // 提取已确认目标
+      // ✅ 统一使用 smoothBox 显示
       final stable = _tracks.values
           .where((t) => t.confirmed)
-          .map((t) => t.box)
+          .map((t) => t.smoothBox)
           .toList();
 
       setState(() {
@@ -472,14 +472,14 @@ class Detection {
 class _Track {
   Detection box;
   Detection smoothBox;
-  double vx = 0, vy = 0; // 归一化坐标下的速度
+  double vx = 0, vy = 0;
   int hits = 0;
   int misses = 0;
   bool matched = false;
   Detection? lastDet;
 
-  static const double _alpha = 0.4;
-  static const double _velAlpha = 0.3; // 速度EMA系数
+  static const double _alpha = 0.5;     // ✅ 移动时更信任新观测
+  static const double _velAlpha = 0.3;
 
   _Track(Detection det)
       : box = det,
@@ -501,7 +501,7 @@ class _Track {
     }
     lastDet = det;
 
-    // ✅ EMA平滑 + 速度补偿（预测当前帧真实位置）
+    // ✅ EMA平滑 + 速度补偿
     final predX = smoothBox.x + vx;
     final predY = smoothBox.y + vy;
     smoothBox = Detection(
@@ -509,7 +509,7 @@ class _Track {
       y: _alpha * det.y + (1 - _alpha) * predY,
       w: _alpha * det.w + (1 - _alpha) * smoothBox.w,
       h: _alpha * det.h + (1 - _alpha) * smoothBox.h,
-      confidence: det.confidence,
+      confidence: det.confidence, // ✅ 始终用原始置信度
       label: det.label,
     );
   }
@@ -517,13 +517,13 @@ class _Track {
   void miss() {
     matched = false;
     misses++;
-    // ✅ 丢失时用速度外推，保持框不消失
+    // ✅ 丢失时用速度外推，置信度不衰减
     smoothBox = Detection(
       x: smoothBox.x + vx,
       y: smoothBox.y + vy,
       w: smoothBox.w,
       h: smoothBox.h,
-      confidence: smoothBox.confidence * 0.9, // 逐渐衰减
+      confidence: box.confidence, // ✅ 保持最后一次真实置信度
       label: smoothBox.label,
     );
   }
