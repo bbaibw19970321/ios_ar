@@ -31,7 +31,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   final Map<String, _Track> _tracks = {};
   int _nextId = 0;
   static const int _confirmHits = 1;
-  static const int _maxMisses = 10;     // ✅ 6→10，容忍移动漏检
+  static const int _maxMisses = 4;     // ✅ 6→10，容忍移动漏检
   static const double _iouThresh = 0.15; // ✅ 0.2→0.15，模糊框也能匹配
 
   @override
@@ -478,8 +478,8 @@ class _Track {
   bool matched = false;
   Detection? lastDet;
 
-  static const double _alpha = 0.5;     // ✅ 移动时更信任新观测
-  static const double _velAlpha = 0.3;
+  static const double _alpha = 0.7;     // ✅ 0.5→0.7，更快响应新位置
+  static const double _velAlpha = 0.5;  // ✅ 0.3→0.5，速度估计更灵敏
 
   _Track(Detection det)
       : box = det,
@@ -492,7 +492,6 @@ class _Track {
     hits++;
     box = det;
 
-    // ✅ 估计速度
     if (lastDet != null) {
       final rawVx = det.x - lastDet!.x;
       final rawVy = det.y - lastDet!.y;
@@ -501,7 +500,7 @@ class _Track {
     }
     lastDet = det;
 
-    // ✅ EMA平滑 + 速度补偿
+    // ✅ 预测 + EMA，alpha=0.7 意味着70%信任当前观测
     final predX = smoothBox.x + vx;
     final predY = smoothBox.y + vy;
     smoothBox = Detection(
@@ -509,7 +508,7 @@ class _Track {
       y: _alpha * det.y + (1 - _alpha) * predY,
       w: _alpha * det.w + (1 - _alpha) * smoothBox.w,
       h: _alpha * det.h + (1 - _alpha) * smoothBox.h,
-      confidence: det.confidence, // ✅ 始终用原始置信度
+      confidence: det.confidence,
       label: det.label,
     );
   }
@@ -517,13 +516,12 @@ class _Track {
   void miss() {
     matched = false;
     misses++;
-    // ✅ 丢失时用速度外推，置信度不衰减
     smoothBox = Detection(
       x: smoothBox.x + vx,
       y: smoothBox.y + vy,
       w: smoothBox.w,
       h: smoothBox.h,
-      confidence: box.confidence, // ✅ 保持最后一次真实置信度
+      confidence: box.confidence,
       label: smoothBox.label,
     );
   }
