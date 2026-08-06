@@ -12,7 +12,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var arSession: ARSession?
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
-    private let interval: CFTimeInterval = 0.1
+    private let interval: CFTimeInterval = 0.033 
     private var retryCount = 0
 
     public static func register(with registrar: FlutterPluginRegistrar) {

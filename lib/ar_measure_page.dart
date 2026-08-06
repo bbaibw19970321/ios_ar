@@ -30,7 +30,7 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   // ✅ IoU 跟踪去抖（替代旧的网格key方案）
   final Map<String, _Track> _tracks = {};
   int _nextId = 0;
-  static const int _confirmHits = 3;
+  static const int _confirmHits = 1;
   static const int _maxMisses = 6;
   static const double _iouThresh = 0.2;
 
