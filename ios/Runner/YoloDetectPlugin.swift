@@ -229,17 +229,20 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     }
 
     /// ✅ 时序融合：跨帧NMS + 置信度加权平均
+        /// ✅ 修复版时序融合
     private func temporalFuse(_ frames: [[[String: Any]]]) -> [[String: Any]] {
-        var all: [(box: [String: Any], conf: Double)] = []
-        for frame in frames {
+        // 展平所有帧的框，附带来源帧索引
+        var all: [(box: [String: Any], conf: Double, frameIdx: Int)] = []
+        for (idx, frame) in frames.enumerated() {
             for b in frame {
-                if let c = b["conf"] as? Double {
-                    all.append((b, c))
+                if let c = b["conf"] as? Double, c > 0.2 { // ✅ 降低内部阈值
+                    all.append((b, c, idx))
                 }
             }
         }
         guard !all.isEmpty else { return [] }
 
+        // 按置信度降序
         all.sort { $0.conf > $1.conf }
 
         var result: [[String: Any]] = []
@@ -253,14 +256,16 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                   let wi = bi["w"] as? Double,
                   let hi = bi["h"] as? Double else { continue }
 
-            var sumX = xi * all[i].conf
-            var sumY = yi * all[i].conf
-            var sumW = wi * all[i].conf
-            var sumH = hi * all[i].conf
-            var sumC = all[i].conf
-            var count = 1
+            // ✅ 直接用最高置信度作为基准，不做除法衰减
+            var bestConf = all[i].conf
+            var sumX = xi * bestConf
+            var sumY = yi * bestConf
+            var sumW = wi * bestConf
+            var sumH = hi * bestConf
+            var weightSum = bestConf
             used.insert(i)
 
+            // 合并同组框
             for j in (i+1)..<all.count {
                 guard !used.contains(j) else { continue }
                 let bj = all[j].box
@@ -276,27 +281,33 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 let union = wi*hi + wj*hj - inter
                 let iou = union > 0 ? inter / union : 0.0
 
-                if iou > 0.3 {
+                if iou > 0.25 { // ✅ IoU阈值从0.3降到0.25，模糊框变形也能合并
                     let cj = all[j].conf
                     sumX += xj * cj; sumY += yj * cj
                     sumW += wj * cj; sumH += hj * cj
-                    sumC += cj; count += 1
+                    weightSum += cj
+                    // ✅ 取最大置信度而非平均
+                    bestConf = max(bestConf, cj)
                     used.insert(j)
                 }
             }
 
+            // ✅ 输出置信度 = 组内最高置信度（不衰减）
+            // 多帧命中天然可信，不需要额外boost也不需要除法
             result.append([
-                "x": sumX / sumC,
-                "y": sumY / sumC,
-                "w": sumW / sumC,
-                "h": sumH / sumC,
-                "conf": min(1.0, sumC / Double(count) * (1.0 + 0.1 * Double(count - 1))),
-                "label": bi["label"] as? String ?? "snail"
+                "x": sumX / weightSum,
+                "y": sumY / weightSum,
+                "w": sumW / weightSum,
+                "h": sumH / weightSum,
+                "conf": bestConf,
+                "label":"snail"
             ])
         }
-        return result
-    }
 
+        // ✅ 只保留置信度 > 0.25 的结果（与Dart端0.3阈值留有余量）
+        return result.filter { ($0["conf"] as? Double ?? 0) > 0.25 }
+    }
+    
     private func findARSession() -> ARSession? {
         guard let window = UIApplication.shared.windows.first else { return nil }
         return searchView(window)
