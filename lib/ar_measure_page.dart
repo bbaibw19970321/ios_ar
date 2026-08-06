@@ -471,22 +471,61 @@ class Detection {
 
 class _Track {
   Detection box;
+  Detection smoothBox;
+  double vx = 0, vy = 0; // 归一化坐标下的速度
   int hits = 0;
   int misses = 0;
   bool matched = false;
+  Detection? lastDet;
 
-  _Track(this.box);
+  static const double _alpha = 0.4;
+  static const double _velAlpha = 0.3; // 速度EMA系数
+
+  _Track(Detection det)
+      : box = det,
+        smoothBox = det,
+        lastDet = det;
 
   void update(Detection det) {
     matched = true;
     misses = 0;
     hits++;
-    box = det; // ✅ 直接用原始坐标，零修改
+    box = det;
+
+    // ✅ 估计速度
+    if (lastDet != null) {
+      final rawVx = det.x - lastDet!.x;
+      final rawVy = det.y - lastDet!.y;
+      vx = _velAlpha * rawVx + (1 - _velAlpha) * vx;
+      vy = _velAlpha * rawVy + (1 - _velAlpha) * vy;
+    }
+    lastDet = det;
+
+    // ✅ EMA平滑 + 速度补偿（预测当前帧真实位置）
+    final predX = smoothBox.x + vx;
+    final predY = smoothBox.y + vy;
+    smoothBox = Detection(
+      x: _alpha * det.x + (1 - _alpha) * predX,
+      y: _alpha * det.y + (1 - _alpha) * predY,
+      w: _alpha * det.w + (1 - _alpha) * smoothBox.w,
+      h: _alpha * det.h + (1 - _alpha) * smoothBox.h,
+      confidence: det.confidence,
+      label: det.label,
+    );
   }
 
   void miss() {
     matched = false;
     misses++;
+    // ✅ 丢失时用速度外推，保持框不消失
+    smoothBox = Detection(
+      x: smoothBox.x + vx,
+      y: smoothBox.y + vy,
+      w: smoothBox.w,
+      h: smoothBox.h,
+      confidence: smoothBox.confidence * 0.9, // 逐渐衰减
+      label: smoothBox.label,
+    );
   }
 
   bool get confirmed =>

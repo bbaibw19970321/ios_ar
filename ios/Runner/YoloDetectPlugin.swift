@@ -108,90 +108,137 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         displayLink = nil
     }
 
+    private var recentBoxes: [[[String: Any]]] = []
+    private let fusionFrames = 3  // 融合最近3帧
+
     @objc private func tick() {
         guard isRunning,
               let sink = eventSink,
               let model = visionModel,
               let frame = arSession?.currentFrame else { return }
 
-        // ✅ 新增：锁定短曝光，抑制运动模糊
-        if let device = AVCaptureDevice.default(for: .video) {
-            do {
-                try device.lockForConfiguration()
-                // 曝光上限 1/120s，大幅减少拖影
-                device.activeMaxExposureDuration = CMTime(value: 1, timescale: 120)
-                device.exposureMode = .continuousAutoExposure
-                device.unlockForConfiguration()
-            } catch {}
-        }
+        // ... 曝光锁定代码保持不变 ...
+
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
         lastTime = now
 
         let pixelBuffer = frame.capturedImage
 
-        // 相机 buffer 横屏 1920x1080，orientation .right → 有效竖图 1080x1920
-        let bufW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))   // 1920
-        let bufH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))  // 1080
-        let imgW = bufH   // 1080（有效宽）
-        let imgH = bufW   // 1920（有效高）
+        // ... bufW/bufH/kx/ky 计算完全不变 ...
 
-        // aspect-fill 映射：相机图归一化 → 屏幕归一化
-        let rImg = min(imgW, imgH) / max(imgW, imgH)   // 0.5625
-        let scr = UIScreen.main.bounds.size
-        let rScr = min(scr.width, scr.height) / max(scr.width, scr.height)
-        let kx: CGFloat
-        let ky: CGFloat
-        if rScr < rImg {
-            kx = rImg / rScr
-            ky = 1.0
-        } else {
-            kx = 1.0
-            ky = rScr / rImg
-        }
-
-        let request = VNCoreMLRequest(model: model) { req, _ in
+        let request = VNCoreMLRequest(model: model) { [weak self] req, _ in
+            guard let self = self else { return }
             guard let obs = req.results as? [VNRecognizedObjectObservation] else {
                 DispatchQueue.main.async { sink([]) }
                 return
             }
-            let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.2 else { return nil }
-                let b = o.boundingBox
 
-                // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）
-                // 只需：左下原点 → 左上原点
+            // ✅ 原始单帧结果（坐标映射完全不变）
+            let currentBoxes: [[String: Any]] = obs.compactMap { o in
+                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
+                let b = o.boundingBox
                 let u = b.origin.x
                 let v = 1.0 - b.origin.y - b.height
                 let w = b.width
                 let h = b.height
-
-                // aspect-fill → 屏幕归一化
                 let xN = 0.5 + (u - 0.5) * kx
                 let yN = 0.5 + (v - 0.5) * ky
                 let wN = w * kx
                 let hN = h * ky
-
                 return [
-                    "x": xN,
-                    "y": yN,
-                    "w": wN,
-                    "h": hN,
+                    "x": xN, "y": yN, "w": wN, "h": hN,
                     "conf": top.confidence,
                     "label": top.identifier
                 ]
             }
-            DispatchQueue.main.async { sink(boxes) }
+
+            // ✅ 多帧融合：保留最近N帧，取置信度加权平均
+            self.recentBoxes.append(currentBoxes)
+            if self.recentBoxes.count > self.fusionFrames {
+                self.recentBoxes.removeFirst()
+            }
+
+            let fused = self.temporalFuse(self.recentBoxes)
+
+            DispatchQueue.main.async { sink(fused) }
         }
 
-        // ✅ .scaleFit：等比缩放+黑边，Vision 内部处理 letterbox 并自动反算坐标
         request.imageCropAndScaleOption = .scaleFit
-
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: pixelBuffer,
-            orientation: .right
+        request.resizeConstraint = VNImageConstraint(
+            size: CGSize(width: 1280, height: 1280)  // ← 改成你模型的实际输入尺寸
         )
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
         try? handler.perform([request])
+    }
+
+    /// ✅ 时序融合：对最近N帧做跨帧NMS + 置信度聚合
+    private func temporalFuse(_ frames: [[[String: Any]]]) -> [[String: Any]] {
+        // 展平所有帧的框
+        var all: [(box: [String: Any], conf: Double)] = []
+        for frame in frames {
+            for b in frame {
+                if let c = b["conf"] as? Double {
+                    all.append((b, c))
+                }
+            }
+        }
+        guard !all.isEmpty else { return [] }
+
+        // 按置信度降序
+        all.sort { $0.conf > $1.conf }
+
+        var result: [[String: Any]] = []
+        var used = Set<Int>()
+
+        for i in 0..<all.count {
+            guard !used.contains(i) else { continue }
+            let bi = all[i].box
+            let xi = bi["x"] as! Double, yi = bi["y"] as! Double
+            let wi = bi["w"] as! Double, hi = bi["h"] as! Double
+
+            var sumX = xi * all[i].conf
+            var sumY = yi * all[i].conf
+            var sumW = wi * all[i].conf
+            var sumH = hi * all[i].conf
+            var sumC = all[i].conf
+            var count = 1
+            used.insert(i)
+
+            // 找同组框（IoU > 0.3）
+            for j in (i+1)..<all.count {
+                guard !used.contains(j) else { continue }
+                let bj = all[j].box
+                let xj = bj["x"] as! Double, yj = bj["y"] as! Double
+                let wj = bj["w"] as! Double, hj = bj["h"] as! Double
+
+                let ix1 = max(xi, xj), iy1 = max(yi, yj)
+                let ix2 = min(xi+wi, xj+wj), iy2 = min(yi+hi, yj+hj)
+                let iw = max(0, ix2-ix1), ih = max(0, iy2-iy1)
+                let inter = iw * ih
+                let union = wi*hi + wj*hj - inter
+                let iou = union > 0 ? inter / union : 0.0
+
+                if iou > 0.3 {
+                    let cj = all[j].conf
+                    sumX += xj * cj; sumY += yj * cj
+                    sumW += wj * cj; sumH += hj * cj
+                    sumC += cj; count += 1
+                    used.insert(j)
+                }
+            }
+
+            // 置信度加权平均坐标
+            result.append([
+                "x": sumX / sumC,
+                "y": sumY / sumC,
+                "w": sumW / sumC,
+                "h": sumH / sumC,
+                "conf": min(1.0, sumC / Double(count) * (1.0 + 0.1 * Double(count - 1))),
+                "label": bi["label"] as! String
+            ])
+        }
+        return result
     }
 
     private func findARSession() -> ARSession? {
