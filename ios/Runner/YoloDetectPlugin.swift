@@ -177,7 +177,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
 
             // ✅ 单帧直出，不做多帧融合
             let currentBoxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.25 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.3 else { return nil }
                 let b = o.boundingBox
 
                 let u = b.origin.x
