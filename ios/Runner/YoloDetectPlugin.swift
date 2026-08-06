@@ -12,7 +12,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var arSession: ARSession?
     private var isRunning = false
     private var lastTime: CFTimeInterval = 0
-    private let interval: CFTimeInterval = 0.1
+    private let interval: CFTimeInterval = 0.033 
     private var retryCount = 0
 
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -114,6 +114,16 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
               let model = visionModel,
               let frame = arSession?.currentFrame else { return }
 
+        // ✅ 新增：锁定短曝光，抑制运动模糊
+        if let device = AVCaptureDevice.default(for: .video) {
+            do {
+                try device.lockForConfiguration()
+                // 曝光上限 1/120s，大幅减少拖影
+                device.activeMaxExposureDuration = CMTime(value: 1, timescale: 120)
+                device.exposureMode = .continuousAutoExposure
+                device.unlockForConfiguration()
+            } catch {}
+        }
         let now = CACurrentMediaTime()
         guard now - lastTime >= interval else { return }
         lastTime = now
@@ -146,7 +156,7 @@ public class YoloDetectPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
                 return
             }
             let boxes: [[String: Any]] = obs.compactMap { o in
-                guard let top = o.labels.first, top.confidence > 0.1 else { return nil }
+                guard let top = o.labels.first, top.confidence > 0.2 else { return nil }
                 let b = o.boundingBox
 
                 // ✅ Vision 已自动将坐标映射回原始图像空间（1080x1920 归一化）

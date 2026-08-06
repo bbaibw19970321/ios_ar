@@ -27,10 +27,12 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
   bool _detecting = false;
   int _snailCount = 0;
 
-  // ✅ 连续 帧确认
-  List<Detection> _prevDetections = [];
-  final Map<String, int> _hitCount = {};
-  static const int _stableFrames = 1;
+  // ✅ IoU 跟踪去抖（替代旧的网格key方案）
+  final Map<String, _Track> _tracks = {};
+  int _nextId = 0;
+  static const int _confirmHits = 1;
+  static const int _maxMisses = 6;
+  static const double _iouThresh = 0.2;
 
   @override
   void dispose() {
@@ -84,14 +86,14 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
         _detecting = false;
         _detections = [];
         _snailCount = 0;
-        _prevDetections = [];
-        _hitCount.clear();
+        _tracks.clear();
+        _nextId = 0;
         _info = '检测已停止';
       });
     }
   }
 
-  // ✅ 连续 3 帧命中才显示
+  // ✅ IoU 贪心跟踪去抖（坐标零修改）
   void _onDetections(dynamic data) {
     if (!mounted || data == null) return;
     try {
@@ -105,48 +107,56 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
           confidence: (m['conf'] as num).toDouble(),
           label: m['label'] as String? ?? 'snail',
         );
-      }).where((d) => d.confidence > 0.1).toList();
+      }).where((d) => d.confidence > 0.2).toList();
 
-      final newHitCount = <String, int>{};
-      final stable = <Detection>[];
+      // 标记所有轨迹未匹配
+      for (final t in _tracks.values) t.matched = false;
 
-      for (final c in current) {
-        final matched = _prevDetections.any((p) => _iou(c, p) > 0.4);
-        final key = _detectionKey(c);
-
-        if (matched) {
-          final count = (_hitCount[key] ?? 1) + 1;
-          newHitCount[key] = count;
-          if (count >= _stableFrames) {
-            stable.add(c);
+      // 贪心 IoU 匹配
+      final usedTracks = <String>{};
+      for (final det in current) {
+        String? bestId;
+        double bestIou = _iouThresh;
+        for (final entry in _tracks.entries) {
+          if (usedTracks.contains(entry.key)) continue;
+          final iou = _computeIoU(det, entry.value.box);
+          if (iou > bestIou) {
+            bestIou = iou;
+            bestId = entry.key;
           }
+        }
+        if (bestId != null) {
+          _tracks[bestId]!.update(det);
+          usedTracks.add(bestId);
         } else {
-          newHitCount[key] = 1;
+          _tracks['t${_nextId++}'] = _Track(det);
         }
       }
 
-      _prevDetections = current;
-      _hitCount
-        ..clear()
-        ..addAll(newHitCount);
+      // 未匹配轨迹计 miss
+      for (final t in _tracks.values) {
+        if (!t.matched) t.miss();
+      }
+
+      // 清除死亡轨迹
+      _tracks.removeWhere((_, t) => t.dead);
+
+      // 提取已确认目标
+      final stable = _tracks.values
+          .where((t) => t.confirmed)
+          .map((t) => t.box)
+          .toList();
 
       setState(() {
         _detections = stable;
         _snailCount = stable.length;
       });
     } catch (e) {
-      debugPrint('⚠️ 解析检测结果出错: $e');
+      debugPrint('⚠️ 跟踪异常: $e');
     }
   }
 
-  /// 将屏幕分成 10×10 网格，同格视为同一目标
-  String _detectionKey(Detection d) {
-    final gx = (d.x * 10).floor().clamp(0, 9);
-    final gy = (d.y * 10).floor().clamp(0, 9);
-    return '${d.label}_${gx}_$gy';
-  }
-
-  double _iou(Detection a, Detection b) {
+  double _computeIoU(Detection a, Detection b) {
     final ax2 = a.x + a.w, ay2 = a.y + a.h;
     final bx2 = b.x + b.w, by2 = b.y + b.h;
     final ix1 = a.x > b.x ? a.x : b.x;
@@ -154,10 +164,10 @@ class _ARMeasurePageState extends State<ARMeasurePage> {
     final ix2 = ax2 < bx2 ? ax2 : bx2;
     final iy2 = ay2 < by2 ? ay2 : by2;
     final iw = ix2 - ix1, ih = iy2 - iy1;
-    if (iw <= 0 || ih <= 0) return 0;
+    if (iw <= 0 || ih <= 0) return 0.0;
     final inter = iw * ih;
     final union = a.w * a.h + b.w * b.h - inter;
-    return union > 0 ? inter / union : 0;
+    return union > 0 ? inter / union : 0.0;
   }
 
   // ============================================================
@@ -453,6 +463,37 @@ class Detection {
     required this.confidence,
     required this.label,
   });
+}
+
+// ============================================================
+//  IoU 跟踪器（去抖核心）
+// ============================================================
+
+class _Track {
+  Detection box;
+  int hits = 0;
+  int misses = 0;
+  bool matched = false;
+
+  _Track(this.box);
+
+  void update(Detection det) {
+    matched = true;
+    misses = 0;
+    hits++;
+    box = det; // ✅ 直接用原始坐标，零修改
+  }
+
+  void miss() {
+    matched = false;
+    misses++;
+  }
+
+  bool get confirmed =>
+      hits >= _ARMeasurePageState._confirmHits &&
+      misses <= _ARMeasurePageState._maxMisses;
+
+  bool get dead => misses > _ARMeasurePageState._maxMisses;
 }
 
 // ============================================================
